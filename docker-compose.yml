@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  openclaw-api-proxy:
+    build: .
+    image: openclaw-api-proxy:latest
+    container_name: openclaw-api-proxy
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      # Optional: set a bearer token to restrict proxy access
+      # PROXY_AUTH_TOKEN: "your-secret-token-here"
+
+      # --- Paste your real API keys below ---
+      # RESEND_API_KEY: ""
+      # YNAB_API_KEY: ""
+      # OPENROUTER_API_KEY: ""
+      # GITHUB_TOKEN: ""
+      # CLOUDFLARE_API_TOKEN: ""
+      # DARAJA_ACCESS_TOKEN: ""
+      # GOOGLE_API_KEY: ""
+      # STRIPE_SECRET_KEY: ""
+      # SLACK_BOT_TOKEN: ""
+      # TWILIO_AUTH_TOKEN: ""
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

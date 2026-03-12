@@ -1,0 +1,27 @@
+{
+  "name": "openclaw-api-proxy",
+  "version": "1.0.0",
+  "description": "Zero-knowledge API proxy for AI agents. Inject API keys from env, never from agent context.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "api-proxy",
+    "ai-agents",
+    "openclaw",
+    "zero-knowledge",
+    "api-keys",
+    "security"
+  ],
+  "author": "Kaara Works",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.2"
+  }
+}

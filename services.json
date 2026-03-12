@@ -1,0 +1,62 @@
+{
+  "resend": {
+    "baseUrl": "https://api.resend.com",
+    "keyEnv": "RESEND_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "ynab": {
+    "baseUrl": "https://api.youneedabudget.com",
+    "keyEnv": "YNAB_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "openrouter": {
+    "baseUrl": "https://openrouter.ai/api",
+    "keyEnv": "OPENROUTER_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "github": {
+    "baseUrl": "https://api.github.com",
+    "keyEnv": "GITHUB_TOKEN",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "cloudflare": {
+    "baseUrl": "https://api.cloudflare.com/client/v4",
+    "keyEnv": "CLOUDFLARE_API_TOKEN",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "safaricom-daraja": {
+    "baseUrl": "https://api.safaricom.co.ke",
+    "keyEnv": "DARAJA_ACCESS_TOKEN",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "google-calendar": {
+    "baseUrl": "https://www.googleapis.com/calendar",
+    "keyEnv": "GOOGLE_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "stripe": {
+    "baseUrl": "https://api.stripe.com",
+    "keyEnv": "STRIPE_SECRET_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "slack": {
+    "baseUrl": "https://slack.com/api",
+    "keyEnv": "SLACK_BOT_TOKEN",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "twilio": {
+    "baseUrl": "https://api.twilio.com",
+    "keyEnv": "TWILIO_AUTH_TOKEN",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  }
+}
