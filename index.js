@@ -11,6 +11,7 @@ const express = require("express");
 const { createProxyMiddleware } = require("http-proxy-middleware");
 const path = require("path");
 const fs = require("fs");
+const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,6 +20,9 @@ const PROXY_AUTH_TOKEN = process.env.PROXY_AUTH_TOKEN || null;
 // Load service registry
 const servicesPath = path.join(__dirname, "services.json");
 const SERVICES = JSON.parse(fs.readFileSync(servicesPath, "utf8"));
+
+// Body parsing for /api/* routes
+app.use("/api", express.json({ limit: "10mb" }));
 
 // Optional: request logger
 app.use((req, res, next) => {
@@ -44,7 +48,26 @@ app.get("/health", (req, res) => {
     name,
     configured: !!process.env[SERVICES[name].keyEnv],
   }));
-  res.json({ status: "ok", services });
+  const nangoConfigured = !!(
+    process.env.NANGO_SECRET_KEY &&
+    process.env.NANGO_CONNECTION_ID &&
+    process.env.NANGO_PROVIDER_CONFIG_KEY
+  );
+  res.json({
+    status: "ok",
+    services,
+    gmail: {
+      configured: nangoConfigured,
+      endpoints: [
+        "POST /api/gmail/drafts/create",
+        "POST /api/gmail/drafts/send",
+        "POST /api/gmail/messages/send",
+        "GET  /api/gmail/messages",
+        "GET  /api/gmail/messages/:id",
+        "DELETE /api/gmail/messages/:id",
+      ],
+    },
+  });
 });
 
 // List available services
@@ -57,9 +80,318 @@ app.get("/services", (req, res) => {
   res.json(list);
 });
 
-// Dynamic proxy: /proxy/:service/*
-// All requests go through here. The proxy injects the API key header
-// and strips the /proxy/:service prefix before forwarding.
+// --------------------------------------------------------------------------
+// Nango helper: make a request through the Nango proxy
+// --------------------------------------------------------------------------
+function nangoRequest({ method, path, body, query }) {
+  return new Promise((resolve, reject) => {
+    const NANGO_SECRET = process.env.NANGO_SECRET_KEY;
+    const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
+    const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+
+    if (!NANGO_SECRET || !CONNECTION_ID) {
+      return reject(new Error("NANGO_SECRET_KEY or NANGO_CONNECTION_ID not configured"));
+    }
+
+    const qs = query ? "?" + new URLSearchParams(query).toString() : "";
+    const reqPath = `/v1/proxy${path}${qs}`;
+    const bodyStr = body ? JSON.stringify(body) : null;
+
+    const options = {
+      hostname: "api.nango.dev",
+      port: 443,
+      path: reqPath,
+      method: method.toUpperCase(),
+      headers: {
+        Authorization: `Bearer ${NANGO_SECRET}`,
+        "Provider-Config-Key": PROVIDER_CONFIG_KEY,
+        "Connection-Id": CONNECTION_ID,
+        "Content-Type": "application/json",
+      },
+    };
+
+    if (bodyStr) {
+      options.headers["Content-Length"] = Buffer.byteLength(bodyStr);
+    }
+
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          resolve({ status: resp.statusCode, body: JSON.parse(data) });
+        } catch {
+          resolve({ status: resp.statusCode, body: data });
+        }
+      });
+    });
+
+    req.on("error", reject);
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
+
+// --------------------------------------------------------------------------
+// RFC 2822 email builder -> base64url encoded "raw" field for Gmail API
+// --------------------------------------------------------------------------
+function buildRawEmail({ to, from, subject, body, bodyHtml, replyTo, cc, bcc }) {
+  const lines = [];
+  lines.push(`From: ${from}`);
+  lines.push(`To: ${to}`);
+  if (cc) lines.push(`Cc: ${cc}`);
+  if (bcc) lines.push(`Bcc: ${bcc}`);
+  if (replyTo) lines.push(`Reply-To: ${replyTo}`);
+  lines.push(`Subject: ${subject}`);
+  lines.push(`MIME-Version: 1.0`);
+
+  if (bodyHtml) {
+    const boundary = `----=_Part_${Date.now()}`;
+    lines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+    lines.push("");
+    lines.push(`--${boundary}`);
+    lines.push("Content-Type: text/plain; charset=UTF-8");
+    lines.push("Content-Transfer-Encoding: 7bit");
+    lines.push("");
+    lines.push(body || "");
+    lines.push(`--${boundary}`);
+    lines.push("Content-Type: text/html; charset=UTF-8");
+    lines.push("Content-Transfer-Encoding: 7bit");
+    lines.push("");
+    lines.push(bodyHtml);
+    lines.push(`--${boundary}--`);
+  } else {
+    lines.push("Content-Type: text/plain; charset=UTF-8");
+    lines.push("Content-Transfer-Encoding: 7bit");
+    lines.push("");
+    lines.push(body || "");
+  }
+
+  const raw = lines.join("\r\n");
+  // Base64url encode (Gmail requires URL-safe base64 without padding)
+  return Buffer.from(raw)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+// --------------------------------------------------------------------------
+// Gmail API routes
+// All routes: /api/gmail/...
+// --------------------------------------------------------------------------
+
+/**
+ * POST /api/gmail/drafts/create
+ * Body: { to, from, subject, body, bodyHtml?, cc?, bcc?, replyTo? }
+ * Returns: { draftId, threadId, message }
+ */
+app.post("/api/gmail/drafts/create", async (req, res) => {
+  const { to, from, subject, body, bodyHtml, cc, bcc, replyTo } = req.body || {};
+  if (!to || !subject) {
+    return res.status(400).json({ error: "Missing required fields: to, subject" });
+  }
+
+  const raw = buildRawEmail({ to, from, subject, body, bodyHtml, cc, bcc, replyTo });
+
+  try {
+    const result = await nangoRequest({
+      method: "POST",
+      path: "/gmail/users/me/drafts",
+      body: { message: { raw } },
+    });
+
+    if (result.status >= 200 && result.status < 300) {
+      return res.status(200).json({
+        success: true,
+        draftId: result.body.id,
+        threadId: result.body.message?.threadId,
+        messageId: result.body.message?.id,
+        raw: result.body,
+      });
+    }
+    return res.status(result.status).json({ error: "Nango error", detail: result.body });
+  } catch (err) {
+    console.error("[gmail/drafts/create] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/gmail/drafts/send
+ * Body: { draftId }
+ * Returns: { messageId, threadId, labelIds }
+ */
+app.post("/api/gmail/drafts/send", async (req, res) => {
+  const { draftId } = req.body || {};
+  if (!draftId) {
+    return res.status(400).json({ error: "Missing required field: draftId" });
+  }
+
+  try {
+    const result = await nangoRequest({
+      method: "POST",
+      path: "/gmail/users/me/drafts/send",
+      body: { id: draftId },
+    });
+
+    if (result.status >= 200 && result.status < 300) {
+      return res.status(200).json({
+        success: true,
+        messageId: result.body.id,
+        threadId: result.body.threadId,
+        labelIds: result.body.labelIds,
+        raw: result.body,
+      });
+    }
+    return res.status(result.status).json({ error: "Nango error", detail: result.body });
+  } catch (err) {
+    console.error("[gmail/drafts/send] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/gmail/messages/send
+ * Body: { to, from, subject, body, bodyHtml?, cc?, bcc?, replyTo? }
+ * Builds and sends directly (no draft step)
+ * Returns: { messageId, threadId, labelIds }
+ */
+app.post("/api/gmail/messages/send", async (req, res) => {
+  const { to, from, subject, body, bodyHtml, cc, bcc, replyTo } = req.body || {};
+  if (!to || !subject) {
+    return res.status(400).json({ error: "Missing required fields: to, subject" });
+  }
+
+  const raw = buildRawEmail({ to, from, subject, body, bodyHtml, cc, bcc, replyTo });
+
+  try {
+    const result = await nangoRequest({
+      method: "POST",
+      path: "/gmail/users/me/messages/send",
+      body: { raw },
+    });
+
+    if (result.status >= 200 && result.status < 300) {
+      return res.status(200).json({
+        success: true,
+        messageId: result.body.id,
+        threadId: result.body.threadId,
+        labelIds: result.body.labelIds,
+        raw: result.body,
+      });
+    }
+    return res.status(result.status).json({ error: "Nango error", detail: result.body });
+  } catch (err) {
+    console.error("[gmail/messages/send] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/gmail/messages
+ * Query: ?q=is:unread&maxResults=10&pageToken=...
+ * Returns: { messages, nextPageToken, resultSizeEstimate }
+ */
+app.get("/api/gmail/messages", async (req, res) => {
+  const { q, maxResults, pageToken, labelIds } = req.query;
+  const query = {};
+  if (q) query.q = q;
+  if (maxResults) query.maxResults = maxResults;
+  if (pageToken) query.pageToken = pageToken;
+  if (labelIds) query.labelIds = labelIds;
+
+  try {
+    const result = await nangoRequest({
+      method: "GET",
+      path: "/gmail/users/me/messages",
+      query,
+    });
+
+    if (result.status >= 200 && result.status < 300) {
+      return res.status(200).json({
+        success: true,
+        messages: result.body.messages || [],
+        nextPageToken: result.body.nextPageToken,
+        resultSizeEstimate: result.body.resultSizeEstimate,
+      });
+    }
+    return res.status(result.status).json({ error: "Nango error", detail: result.body });
+  } catch (err) {
+    console.error("[gmail/messages] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/gmail/messages/:id
+ * Query: ?format=full|metadata|minimal|raw
+ * Returns: full message object
+ */
+app.get("/api/gmail/messages/:id", async (req, res) => {
+  const { id } = req.params;
+  const { format } = req.query;
+  const query = {};
+  if (format) query.format = format;
+
+  try {
+    const result = await nangoRequest({
+      method: "GET",
+      path: `/gmail/users/me/messages/${id}`,
+      query: Object.keys(query).length ? query : undefined,
+    });
+
+    if (result.status >= 200 && result.status < 300) {
+      return res.status(200).json({ success: true, message: result.body });
+    }
+    return res.status(result.status).json({ error: "Nango error", detail: result.body });
+  } catch (err) {
+    console.error("[gmail/messages/:id] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/gmail/messages/:id
+ * Moves message to trash (safe; use ?permanent=true to permanently delete)
+ * Returns: { success: true, messageId }
+ */
+app.delete("/api/gmail/messages/:id", async (req, res) => {
+  const { id } = req.params;
+  const permanent = req.query.permanent === "true";
+
+  try {
+    let result;
+    if (permanent) {
+      result = await nangoRequest({
+        method: "DELETE",
+        path: `/gmail/users/me/messages/${id}`,
+      });
+    } else {
+      result = await nangoRequest({
+        method: "POST",
+        path: `/gmail/users/me/messages/${id}/trash`,
+      });
+    }
+
+    if (result.status >= 200 && result.status < 300) {
+      return res.status(200).json({
+        success: true,
+        messageId: id,
+        permanent,
+        raw: result.body,
+      });
+    }
+    return res.status(result.status).json({ error: "Nango error", detail: result.body });
+  } catch (err) {
+    console.error("[gmail/messages/:id DELETE] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// --------------------------------------------------------------------------
+// Dynamic proxy: /proxy/:service/*  (existing API key services)
+// --------------------------------------------------------------------------
 for (const [serviceName, config] of Object.entries(SERVICES)) {
   const { baseUrl, keyEnv, authHeader, authPrefix } = config;
 
@@ -97,7 +429,7 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
 app.use((req, res) => {
   res.status(404).json({
     error: "Not found",
-    hint: "Use /proxy/:service/... to proxy requests. See /services for available services.",
+    hint: "Use /proxy/:service/... for API key services. Use /api/gmail/... for Gmail via Nango. See /health for all endpoints.",
   });
 });
 
@@ -108,7 +440,12 @@ app.listen(PORT, () => {
     .filter(([, c]) => !!process.env[c.keyEnv])
     .map(([n]) => n);
   console.log(`Configured services: ${configured.length ? configured.join(", ") : "none"}`);
+  const nangoReady = !!(
+    process.env.NANGO_SECRET_KEY &&
+    process.env.NANGO_CONNECTION_ID &&
+    process.env.NANGO_PROVIDER_CONFIG_KEY
+  );
+  console.log(`Gmail (Nango): ${nangoReady ? "configured" : "NOT configured"}`);
 });
 
 module.exports = app;
-
