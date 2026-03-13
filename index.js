@@ -105,6 +105,82 @@ app.get("/services", (req, res) => {
 });
 
 // --------------------------------------------------------------------------
+// QB OAuth: token cache (in-memory, service-keyed) - QB tokens valid 3600s
+// --------------------------------------------------------------------------
+const _oauthTokenCache = {};
+
+/**
+ * Fetch (or return cached) QB access token using stored refresh token.
+ * Refreshes 5 min before expiry (TTL = expires_in - 300s).
+ * On failure throws; caller should return 503.
+ */
+async function getOAuthAccessToken(serviceName, config) {
+  const oauthConf = config.oauth;
+  const cached = _oauthTokenCache[serviceName];
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.accessToken;
+  }
+
+  const clientId = process.env[oauthConf.clientIdEnv];
+  const clientSecret = process.env[oauthConf.clientSecretEnv];
+  const refreshToken = process.env[config.keyEnv];
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error(
+      `QB OAuth: missing env vars - need ${oauthConf.clientIdEnv}, ${oauthConf.clientSecretEnv}, ${config.keyEnv}`
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const body = `grant_type=${oauthConf.grantType}&refresh_token=${encodeURIComponent(refreshToken)}`;
+    const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    const tokenUrl = new URL(oauthConf.tokenUrl);
+
+    const options = {
+      hostname: tokenUrl.hostname,
+      port: 443,
+      path: tokenUrl.pathname,
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${credentials}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+        Accept: "application/json",
+      },
+    };
+
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (!parsed.access_token) {
+            return reject(
+              new Error(`QB OAuth: no access_token in response (HTTP ${resp.statusCode}): ${data.slice(0, 200)}`)
+            );
+          }
+          const expiresIn = parsed.expires_in || 3600;
+          const ttl = (expiresIn - 300) * 1000; // refresh 5 min early
+          _oauthTokenCache[serviceName] = {
+            accessToken: parsed.access_token,
+            expiresAt: Date.now() + ttl,
+          };
+          console.log(`[QB OAuth] Refreshed access token, expires in ${expiresIn}s`);
+          resolve(parsed.access_token);
+        } catch (e) {
+          reject(new Error(`QB OAuth: failed to parse response: ${data.slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// --------------------------------------------------------------------------
 // Nango: token cache (per provider:connectionId) - Google tokens valid 60 min
 // --------------------------------------------------------------------------
 const _nangoTokenCache = {};
@@ -485,7 +561,7 @@ app.delete("/api/gmail/messages/:id", async (req, res) => {
 // --------------------------------------------------------------------------
 Object.entries(SERVICES).forEach(([serviceName, config]) => {
   app.use(`/proxy/${serviceName}`, (req, res, next) => {
-    // Skip env-var check for Nango-backed services (they use OAuth, not a keyEnv secret)
+    // Skip env-var check for Nango-backed or QB OAuth services - they check their own vars in the token middleware
     if (config.nango) return next();
     const apiKey = process.env[config.keyEnv];
     if (!apiKey) {
@@ -522,6 +598,20 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
   });
 }
 
+// Pre-middleware: for services with QB-style OAuth config, fetch access token before proxying
+for (const [serviceName, config] of Object.entries(SERVICES)) {
+  if (!config.oauth) continue;
+  app.use(`/proxy/${serviceName}`, async (req, res, next) => {
+    try {
+      req._nangoToken = await getOAuthAccessToken(serviceName, config);
+      next();
+    } catch (err) {
+      console.error(`[ERROR] QB OAuth token fetch for ${serviceName}:`, err.message);
+      res.status(503).json({ error: "QB OAuth token refresh failed", service: serviceName, detail: err.message });
+    }
+  });
+}
+
 for (const [serviceName, config] of Object.entries(SERVICES)) {
   const { baseUrl, keyEnv, authHeader, authPrefix } = config;
 
@@ -540,17 +630,24 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
       },
       on: {
         proxyReq: (proxyReq, req) => {
-          // Use Nango-fetched token (stored in req._nangoToken) or fall back to env var
+          // Use Nango/OAuth-fetched token (stored in req._nangoToken) or fall back to env var
           const apiKey = req._nangoToken || process.env[keyEnv];
           if (!apiKey) {
             console.warn(
-              `[WARN] ${keyEnv} is not set and no Nango token available. Request to ${serviceName} will proceed without auth.`
+              `[WARN] ${keyEnv} is not set and no OAuth/Nango token available. Request to ${serviceName} will proceed without auth.`
             );
             return;
           }
           // Remove any auth header the agent may have sent (never trust agent-supplied keys)
           proxyReq.removeHeader(authHeader);
           proxyReq.setHeader(authHeader, `${authPrefix} ${apiKey}`);
+        },
+        proxyRes: (proxyRes, req) => {
+          // On 401 from an OAuth-backed service, clear the token cache so the next request forces a refresh
+          if (proxyRes.statusCode === 401 && config.oauth && _oauthTokenCache[serviceName]) {
+            console.warn(`[QB OAuth] 401 received from ${serviceName} - clearing token cache, next request will auto-refresh`);
+            delete _oauthTokenCache[serviceName];
+          }
         },
         error: (err, req, res) => {
           console.error(`[ERROR] Proxy error for ${serviceName}:`, err.message);

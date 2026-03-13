@@ -61,9 +61,15 @@
   },
   "quickbooks": {
     "baseUrl": "https://quickbooks.api.intuit.com",
-    "keyEnv": "QUICKBOOKS_API_KEY",
+    "keyEnv": "QUICKBOOKS_REFRESH_TOKEN",
     "authHeader": "Authorization",
-    "authPrefix": "Bearer"
+    "authPrefix": "Bearer",
+    "oauth": {
+      "clientIdEnv": "QUICKBOOKS_CLIENT_ID",
+      "clientSecretEnv": "QUICKBOOKS_CLIENT_SECRET",
+      "tokenUrl": "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
+      "grantType": "refresh_token"
+    }
   },
   "google-sheets": {
     "baseUrl": "https://sheets.googleapis.com/v4",
