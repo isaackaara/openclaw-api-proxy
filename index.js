@@ -81,31 +81,68 @@ app.get("/services", (req, res) => {
 });
 
 // --------------------------------------------------------------------------
-// Nango helper: make a request through the Nango proxy
+// Nango: get current OAuth access token for the connection
+// Nango auto-refreshes expired tokens; we always get a fresh one.
 // --------------------------------------------------------------------------
-function nangoRequest({ method, path, body, query }) {
+async function getNangoToken() {
+  const NANGO_SECRET = process.env.NANGO_SECRET_KEY;
+  const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
+  const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+
+  if (!NANGO_SECRET || !CONNECTION_ID) {
+    throw new Error("NANGO_SECRET_KEY or NANGO_CONNECTION_ID not configured");
+  }
+
   return new Promise((resolve, reject) => {
-    const NANGO_SECRET = process.env.NANGO_SECRET_KEY;
-    const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
-    const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+    const path = `/connection/${CONNECTION_ID}?provider_config_key=${PROVIDER_CONFIG_KEY}&force_refresh=false`;
+    const options = {
+      hostname: "api.nango.dev",
+      port: 443,
+      path,
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${NANGO_SECRET}`,
+      },
+    };
 
-    if (!NANGO_SECRET || !CONNECTION_ID) {
-      return reject(new Error("NANGO_SECRET_KEY or NANGO_CONNECTION_ID not configured"));
-    }
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          const token = parsed?.credentials?.access_token;
+          if (!token) {
+            return reject(new Error(`Nango: no access_token in response (status ${resp.statusCode})`));
+          }
+          resolve(token);
+        } catch (e) {
+          reject(new Error(`Nango: failed to parse response: ${data.slice(0, 200)}`));
+        }
+      });
+    });
 
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+// --------------------------------------------------------------------------
+// Gmail API helper: call Gmail directly with Nango-sourced OAuth token
+// --------------------------------------------------------------------------
+function gmailRequest({ method, path, body, query, token }) {
+  return new Promise((resolve, reject) => {
     const qs = query ? "?" + new URLSearchParams(query).toString() : "";
-    const reqPath = `/v1/proxy${path}${qs}`;
+    const reqPath = `/gmail/v1${path}${qs}`;
     const bodyStr = body ? JSON.stringify(body) : null;
 
     const options = {
-      hostname: "api.nango.dev",
+      hostname: "gmail.googleapis.com",
       port: 443,
       path: reqPath,
       method: method.toUpperCase(),
       headers: {
-        Authorization: `Bearer ${NANGO_SECRET}`,
-        "Provider-Config-Key": PROVIDER_CONFIG_KEY,
-        "Connection-Id": CONNECTION_ID,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
     };
@@ -130,6 +167,12 @@ function nangoRequest({ method, path, body, query }) {
     if (bodyStr) req.write(bodyStr);
     req.end();
   });
+}
+
+// Convenience: get token then call Gmail
+async function nangoRequest({ method, path, body, query }) {
+  const token = await getNangoToken();
+  return gmailRequest({ method, path, body, query, token });
 }
 
 // --------------------------------------------------------------------------
@@ -197,7 +240,7 @@ app.post("/api/gmail/drafts/create", async (req, res) => {
   try {
     const result = await nangoRequest({
       method: "POST",
-      path: "/gmail/users/me/drafts",
+      path: "/users/me/drafts",
       body: { message: { raw } },
     });
 
@@ -231,7 +274,7 @@ app.post("/api/gmail/drafts/send", async (req, res) => {
   try {
     const result = await nangoRequest({
       method: "POST",
-      path: "/gmail/users/me/drafts/send",
+      path: "/users/me/drafts/send",
       body: { id: draftId },
     });
 
@@ -268,7 +311,7 @@ app.post("/api/gmail/messages/send", async (req, res) => {
   try {
     const result = await nangoRequest({
       method: "POST",
-      path: "/gmail/users/me/messages/send",
+      path: "/users/me/messages/send",
       body: { raw },
     });
 
@@ -304,7 +347,7 @@ app.get("/api/gmail/messages", async (req, res) => {
   try {
     const result = await nangoRequest({
       method: "GET",
-      path: "/gmail/users/me/messages",
+      path: "/users/me/messages",
       query,
     });
 
@@ -337,7 +380,7 @@ app.get("/api/gmail/messages/:id", async (req, res) => {
   try {
     const result = await nangoRequest({
       method: "GET",
-      path: `/gmail/users/me/messages/${id}`,
+      path: `/users/me/messages/${id}`,
       query: Object.keys(query).length ? query : undefined,
     });
 
@@ -365,12 +408,12 @@ app.delete("/api/gmail/messages/:id", async (req, res) => {
     if (permanent) {
       result = await nangoRequest({
         method: "DELETE",
-        path: `/gmail/users/me/messages/${id}`,
+        path: `/users/me/messages/${id}`,
       });
     } else {
       result = await nangoRequest({
         method: "POST",
-        path: `/gmail/users/me/messages/${id}/trash`,
+        path: `/users/me/messages/${id}/trash`,
       });
     }
 
@@ -400,7 +443,10 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
     createProxyMiddleware({
       target: baseUrl,
       changeOrigin: true,
-      pathRewrite: { [`^/proxy/${serviceName}`]: "" },
+      pathRewrite: (path) => {
+        // Strip /proxy/serviceName from the beginning
+        return path.replace(new RegExp(`^/proxy/${serviceName}`), "");
+      },
       on: {
         proxyReq: (proxyReq, req) => {
           const apiKey = process.env[keyEnv];
