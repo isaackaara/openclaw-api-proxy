@@ -1,0 +1,77 @@
+# railway.toml
+# Config-as-code for Railway deployments.
+# See: https://docs.railway.com/config-as-code/reference
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "npm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+
+[[deploy.environmentVariables]]
+name = "PROXY_AUTH_TOKEN"
+description = "Bearer token that agents must send to access the proxy. Auto-generated - do not change unless you want to rotate."
+required = true
+# Railway generates a unique value per deployment via ${{ secret() }}
+# Uncomment below line when publishing as a Railway template:
+# defaultValue = "${{ secret() }}"
+
+[[deploy.environmentVariables]]
+name = "PORT"
+description = "Port the proxy listens on. Railway sets this automatically - do not change."
+defaultValue = "3000"
+required = false
+
+[[deploy.environmentVariables]]
+name = "RESEND_API_KEY"
+description = "Resend API key (get from https://resend.com/api-keys). Leave blank if not using Resend."
+required = false
+
+[[deploy.environmentVariables]]
+name = "YNAB_API_KEY"
+description = "YNAB personal access token (get from https://app.youneedabudget.com/settings -> Personal Access Tokens). Leave blank if not using YNAB."
+required = false
+
+[[deploy.environmentVariables]]
+name = "OPENROUTER_API_KEY"
+description = "OpenRouter API key (get from https://openrouter.ai/keys). Leave blank if not using OpenRouter."
+required = false
+
+[[deploy.environmentVariables]]
+name = "GITHUB_TOKEN"
+description = "GitHub personal access token (get from https://github.com/settings/tokens). Leave blank if not using GitHub."
+required = false
+
+[[deploy.environmentVariables]]
+name = "CLOUDFLARE_API_TOKEN"
+description = "Cloudflare API token (get from https://dash.cloudflare.com/profile/api-tokens). Leave blank if not using Cloudflare."
+required = false
+
+[[deploy.environmentVariables]]
+name = "GOOGLE_API_KEY"
+description = "Google API key for Calendar/Sheets (get from https://console.cloud.google.com/apis/credentials). Leave blank if not using Google."
+required = false
+
+[[deploy.environmentVariables]]
+name = "STRIPE_SECRET_KEY"
+description = "Stripe secret key (get from https://dashboard.stripe.com/apikeys). Leave blank if not using Stripe."
+required = false
+
+[[deploy.environmentVariables]]
+name = "SLACK_BOT_TOKEN"
+description = "Slack bot token (get from https://api.slack.com/apps). Leave blank if not using Slack."
+required = false
+
+[[deploy.environmentVariables]]
+name = "TWILIO_AUTH_TOKEN"
+description = "Twilio auth token (get from https://console.twilio.com). Leave blank if not using Twilio."
+required = false
+
+[[deploy.environmentVariables]]
+name = "DARAJA_ACCESS_TOKEN"
+description = "Safaricom Daraja access token (M-Pesa). Leave blank if not using M-Pesa."
+required = false

@@ -251,6 +251,28 @@ Adding more services is a one-line edit in `services.json`.
 
 ---
 
+## Troubleshooting
+
+### Deploy takes more than 5 minutes
+Check Railway logs (your project → Deployments → latest → Logs). If it's stuck at "Building", it may have hit a Railway quota limit.
+- Out of free credits: Go to [Railway billing](https://railway.com/account/billing) and add a payment method ($5 tops up the free tier).
+- Quota exceeded: Railway shows "Usage limit exceeded" in the deploy log. Upgrade plan or wait for monthly reset.
+- If the deploy hangs indefinitely: Click "Cancel" and redeploy. Railway does not auto-timeout hung deploys.
+
+### I deployed but my token is gone after a restart
+If you didn't set `PROXY_AUTH_TOKEN` as a Railway environment variable, a new random token is generated each restart. Fix: in Railway dashboard → your project → Variables, set `PROXY_AUTH_TOKEN` to a value you control.
+
+### `/proxy/ynab` returns a 404
+Check that `YNAB_API_KEY` in Railway is a valid, unexpired token. YNAB tokens expire - regenerate at [app.youneedabudget.com/settings](https://app.youneedabudget.com/settings) → Personal Access Tokens. After updating the variable, Railway will redeploy automatically (takes ~90 seconds).
+
+### I updated an env var but the proxy isn't picking it up
+Railway redeploys automatically when you change variables - this takes about 90 seconds. Check the Deployments tab to confirm the redeploy triggered. If not, click "Redeploy" manually.
+
+### The proxy starts but all services show `configured: false`
+Your API keys are not set. Go to Railway dashboard → Variables and add the keys for the services you want to use. Only set keys you actually need.
+
+---
+
 ## Contributing
 
 PRs welcome. Add new services to `services.json`. Keep `index.js` under 150 lines.

@@ -13,9 +13,25 @@ const path = require("path");
 const fs = require("fs");
 const https = require("https");
 
+const crypto = require("crypto");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
-const PROXY_AUTH_TOKEN = process.env.PROXY_AUTH_TOKEN || null;
+
+// Auto-generate a secure token if none is set.
+// This means a fresh deploy is always auth-guarded - never open by accident.
+// The generated token is printed to Railway logs on startup so the user can copy it.
+let PROXY_AUTH_TOKEN = process.env.PROXY_AUTH_TOKEN || null;
+if (!PROXY_AUTH_TOKEN) {
+  PROXY_AUTH_TOKEN = crypto.randomBytes(32).toString("hex");
+  console.warn("======================================================");
+  console.warn("PROXY_AUTH_TOKEN was not set. A temporary token has");
+  console.warn("been generated for this session:");
+  console.warn(`  ${PROXY_AUTH_TOKEN}`);
+  console.warn("Add PROXY_AUTH_TOKEN to your Railway environment variables");
+  console.warn("to make this token permanent across restarts.");
+  console.warn("======================================================");
+}
 
 // Load service registry
 const servicesPath = path.join(__dirname, "services.json");
