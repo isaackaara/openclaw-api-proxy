@@ -58,5 +58,11 @@
     "keyEnv": "TWILIO_AUTH_TOKEN",
     "authHeader": "Authorization",
     "authPrefix": "Bearer"
+  },
+  "quickbooks": {
+    "baseUrl": "https://quickbooks.api.intuit.com",
+    "keyEnv": "QUICKBOOKS_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
   }
 }
