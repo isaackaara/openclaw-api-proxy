@@ -445,7 +445,11 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
       changeOrigin: true,
       pathRewrite: (path) => {
         // Strip /proxy/serviceName from the beginning
-        return path.replace(new RegExp(`^/proxy/${serviceName}`), "");
+        const rewritten = path.replace(new RegExp(`^/proxy/${serviceName}`), "");
+        if (serviceName === 'ynab') {
+          console.log(`[pathRewrite] ${serviceName}: "${path}" -> "${rewritten}"`);
+        }
+        return rewritten;
       },
       on: {
         proxyReq: (proxyReq, req) => {
