@@ -108,6 +108,7 @@ To add a new service, add an entry to `services.json` and restart.
 | `STRIPE_SECRET_KEY` | No | Stripe secret key |
 | `SLACK_BOT_TOKEN` | No | Slack bot token |
 | `TWILIO_AUTH_TOKEN` | No | Twilio auth token |
+| `GOOGLE_SHEETS_TOKEN` | No | Leave blank - auto-fetched via Nango (provider: google, connectionId: isaac-google) |
 
 Only set the keys you need. Unset services still work at the proxy level; they just forward without an auth header.
 
@@ -236,6 +237,7 @@ The agent never sees the API key value.
 | Stripe | `stripe` | `STRIPE_SECRET_KEY` |
 | Slack | `slack` | `SLACK_BOT_TOKEN` |
 | Twilio | `twilio` | `TWILIO_AUTH_TOKEN` |
+| Google Sheets | `google-sheets` | via Nango `isaac-google` (leave `GOOGLE_SHEETS_TOKEN` blank) |
 
 Adding more services is a one-line edit in `services.json`.
 

@@ -69,6 +69,7 @@ app.get("/health", (req, res) => {
     process.env.NANGO_CONNECTION_ID &&
     process.env.NANGO_PROVIDER_CONFIG_KEY
   );
+  const nangoSheetsConfigured = !!process.env.NANGO_SECRET_KEY;
   res.json({
     status: "ok",
     services,
@@ -82,6 +83,11 @@ app.get("/health", (req, res) => {
         "GET  /api/gmail/messages/:id",
         "DELETE /api/gmail/messages/:id",
       ],
+    },
+    "google-sheets": {
+      configured: nangoSheetsConfigured,
+      note: "Uses Nango (provider: google, connectionId: isaac-google) - token auto-fetched and cached 55 min",
+      endpoint: "GET|POST /proxy/google-sheets/spreadsheets/...",
     },
   });
 });
@@ -97,28 +103,28 @@ app.get("/services", (req, res) => {
 });
 
 // --------------------------------------------------------------------------
-// Nango: get current OAuth access token for the connection
-// Nango auto-refreshes expired tokens; we always get a fresh one.
+// Nango: token cache (per provider:connectionId) - Google tokens valid 60 min
 // --------------------------------------------------------------------------
-async function getNangoToken() {
-  const NANGO_SECRET = process.env.NANGO_SECRET_KEY;
-  const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
-  const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+const _nangoTokenCache = {};
 
-  if (!NANGO_SECRET || !CONNECTION_ID) {
-    throw new Error("NANGO_SECRET_KEY or NANGO_CONNECTION_ID not configured");
+async function getNangoTokenFor(provider, connectionId) {
+  const NANGO_SECRET = process.env.NANGO_SECRET_KEY;
+  if (!NANGO_SECRET) throw new Error("NANGO_SECRET_KEY not configured");
+
+  const cacheKey = `${provider}:${connectionId}`;
+  const cached = _nangoTokenCache[cacheKey];
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token;
   }
 
   return new Promise((resolve, reject) => {
-    const path = `/connection/${CONNECTION_ID}?provider_config_key=${PROVIDER_CONFIG_KEY}&force_refresh=false`;
+    const reqPath = `/connection/${connectionId}?provider_config_key=${provider}&force_refresh=false`;
     const options = {
       hostname: "api.nango.dev",
       port: 443,
-      path,
+      path: reqPath,
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${NANGO_SECRET}`,
-      },
+      headers: { Authorization: `Bearer ${NANGO_SECRET}` },
     };
 
     const req = https.request(options, (resp) => {
@@ -129,8 +135,12 @@ async function getNangoToken() {
           const parsed = JSON.parse(data);
           const token = parsed?.credentials?.access_token;
           if (!token) {
-            return reject(new Error(`Nango: no access_token in response (status ${resp.statusCode})`));
+            return reject(
+              new Error(`Nango: no access_token for ${provider}:${connectionId} (status ${resp.statusCode})`)
+            );
           }
+          // Cache for 55 min (Google tokens valid 60 min)
+          _nangoTokenCache[cacheKey] = { token, expiresAt: Date.now() + 55 * 60 * 1000 };
           resolve(token);
         } catch (e) {
           reject(new Error(`Nango: failed to parse response: ${data.slice(0, 200)}`));
@@ -141,6 +151,20 @@ async function getNangoToken() {
     req.on("error", reject);
     req.end();
   });
+}
+
+// --------------------------------------------------------------------------
+// Nango: get current OAuth access token for Gmail (backward-compat wrapper)
+// --------------------------------------------------------------------------
+async function getNangoToken() {
+  const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
+  const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+
+  if (!CONNECTION_ID) {
+    throw new Error("NANGO_SECRET_KEY or NANGO_CONNECTION_ID not configured");
+  }
+
+  return getNangoTokenFor(PROVIDER_CONFIG_KEY, CONNECTION_ID);
 }
 
 // --------------------------------------------------------------------------
@@ -451,6 +475,22 @@ app.delete("/api/gmail/messages/:id", async (req, res) => {
 // --------------------------------------------------------------------------
 // Dynamic proxy: /proxy/:service/*  (existing API key services)
 // --------------------------------------------------------------------------
+
+// Pre-middleware: for services with Nango OAuth config, fetch token before proxying
+for (const [serviceName, config] of Object.entries(SERVICES)) {
+  if (!config.nango) continue;
+  const { provider, connectionId } = config.nango;
+  app.use(`/proxy/${serviceName}`, async (req, res, next) => {
+    try {
+      req._nangoToken = await getNangoTokenFor(provider, connectionId);
+      next();
+    } catch (err) {
+      console.error(`[ERROR] Nango token fetch for ${serviceName}:`, err.message);
+      res.status(502).json({ error: "Nango token fetch failed", service: serviceName, detail: err.message });
+    }
+  });
+}
+
 for (const [serviceName, config] of Object.entries(SERVICES)) {
   const { baseUrl, keyEnv, authHeader, authPrefix } = config;
 
@@ -469,10 +509,11 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
       },
       on: {
         proxyReq: (proxyReq, req) => {
-          const apiKey = process.env[keyEnv];
+          // Use Nango-fetched token (stored in req._nangoToken) or fall back to env var
+          const apiKey = req._nangoToken || process.env[keyEnv];
           if (!apiKey) {
             console.warn(
-              `[WARN] ${keyEnv} is not set. Request to ${serviceName} will proceed without auth.`
+              `[WARN] ${keyEnv} is not set and no Nango token available. Request to ${serviceName} will proceed without auth.`
             );
             return;
           }

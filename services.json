@@ -64,5 +64,15 @@
     "keyEnv": "QUICKBOOKS_API_KEY",
     "authHeader": "Authorization",
     "authPrefix": "Bearer"
+  },
+  "google-sheets": {
+    "baseUrl": "https://sheets.googleapis.com/v4",
+    "keyEnv": "GOOGLE_SHEETS_TOKEN",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer",
+    "nango": {
+      "provider": "google",
+      "connectionId": "isaac-google"
+    }
   }
 }
