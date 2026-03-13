@@ -71,8 +71,8 @@
     "authHeader": "Authorization",
     "authPrefix": "Bearer",
     "nango": {
-      "provider": "google",
-      "connectionId": "isaac-google"
+      "providerEnv": "NANGO_PROVIDER_CONFIG_KEY",
+      "connectionIdEnv": "NANGO_CONNECTION_ID"
     }
   }
 }

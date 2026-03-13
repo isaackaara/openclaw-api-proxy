@@ -502,10 +502,16 @@ Object.entries(SERVICES).forEach(([serviceName, config]) => {
 });
 
 // Pre-middleware: for services with Nango OAuth config, fetch token before proxying
+// nango config supports direct values (provider/connectionId) or env var references (providerEnv/connectionIdEnv)
 for (const [serviceName, config] of Object.entries(SERVICES)) {
   if (!config.nango) continue;
-  const { provider, connectionId } = config.nango;
   app.use(`/proxy/${serviceName}`, async (req, res, next) => {
+    const nangoConf = config.nango;
+    const provider = nangoConf.provider || (nangoConf.providerEnv && process.env[nangoConf.providerEnv]) || "google";
+    const connectionId = nangoConf.connectionId || (nangoConf.connectionIdEnv && process.env[nangoConf.connectionIdEnv]);
+    if (!connectionId) {
+      return res.status(503).json({ error: "Nango connection not configured", service: serviceName, detail: "Set NANGO_CONNECTION_ID in Railway Variables" });
+    }
     try {
       req._nangoToken = await getNangoTokenFor(provider, connectionId);
       next();
