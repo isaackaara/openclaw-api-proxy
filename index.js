@@ -476,6 +476,29 @@ app.delete("/api/gmail/messages/:id", async (req, res) => {
 // Dynamic proxy: /proxy/:service/*  (existing API key services)
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// Pre-flight check: block requests to unconfigured services BEFORE proxy forwards.
+// This prevents the agent's Authorization header (proxy token) from leaking to
+// upstream APIs when a service env var is missing.
+// --------------------------------------------------------------------------
+Object.entries(SERVICES).forEach(([serviceName, config]) => {
+  app.use(`/proxy/${serviceName}`, (req, res, next) => {
+    // Skip env-var check for Nango-backed services (they use OAuth, not a keyEnv secret)
+    if (config.nango) return next();
+    const apiKey = process.env[config.keyEnv];
+    if (!apiKey) {
+      return res.status(503).json({
+        error: 'Service not configured',
+        service: serviceName,
+        message: `Missing environment variable: ${config.keyEnv}`,
+        action: `Add ${config.keyEnv} to Railway Variables and deploy`,
+        docs: 'https://github.com/isaackaara/openclaw-api-proxy#configuration'
+      });
+    }
+    next();
+  });
+});
+
 // Pre-middleware: for services with Nango OAuth config, fetch token before proxying
 for (const [serviceName, config] of Object.entries(SERVICES)) {
   if (!config.nango) continue;
