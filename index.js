@@ -297,6 +297,15 @@ async function nangoRequest({ method, path, body, query }) {
 // RFC 2822 email builder -> base64url encoded "raw" field for Gmail API
 // --------------------------------------------------------------------------
 function buildRawEmail({ to, from, subject, body, bodyHtml, replyTo, cc, bcc }) {
+  // Auto-detect HTML: if body contains HTML tags and bodyHtml isn't set, treat body as HTML.
+  // This handles the common agent mistake of passing HTML in `body` instead of `bodyHtml`.
+  const htmlPattern = /<(html|body|div|p|table|h[1-6]|ul|ol|li|br|a|img|span|strong|em|style)[^>]*>/i;
+  if (!bodyHtml && body && (htmlPattern.test(body) || /^<!DOCTYPE\s+html/i.test(body.trim()))) {
+    console.log("[buildRawEmail] Auto-detected HTML in body field - treating as bodyHtml");
+    bodyHtml = body;
+    body = body.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(); // strip tags for plain-text fallback
+  }
+
   const lines = [];
   lines.push(`From: ${from}`);
   lines.push(`To: ${to}`);
