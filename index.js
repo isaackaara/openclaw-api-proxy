@@ -185,18 +185,27 @@ async function getOAuthAccessToken(serviceName, config) {
 // --------------------------------------------------------------------------
 const _nangoTokenCache = {};
 
-async function getNangoTokenFor(provider, connectionId) {
+/**
+ * Fetch OAuth access token from Nango, with smart caching.
+ * @param {string} provider - Nango provider config key (e.g. "google")
+ * @param {string} connectionId - Nango connection ID
+ * @param {boolean} forceRefresh - bypass cache and ask Nango to force-refresh
+ */
+async function getNangoTokenFor(provider, connectionId, forceRefresh = false) {
   const NANGO_SECRET = process.env.NANGO_SECRET_KEY;
   if (!NANGO_SECRET) throw new Error("NANGO_SECRET_KEY not configured");
 
   const cacheKey = `${provider}:${connectionId}`;
-  const cached = _nangoTokenCache[cacheKey];
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.token;
+
+  if (!forceRefresh) {
+    const cached = _nangoTokenCache[cacheKey];
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.token;
+    }
   }
 
   return new Promise((resolve, reject) => {
-    const reqPath = `/connection/${connectionId}?provider_config_key=${provider}&force_refresh=false`;
+    const reqPath = `/connection/${connectionId}?provider_config_key=${provider}&force_refresh=${forceRefresh ? 'true' : 'false'}`;
     const options = {
       hostname: "api.nango.dev",
       port: 443,
@@ -217,8 +226,29 @@ async function getNangoTokenFor(provider, connectionId) {
               new Error(`Nango: no access_token for ${provider}:${connectionId} (status ${resp.statusCode})`)
             );
           }
-          // Cache for 55 min (Google tokens valid 60 min)
-          _nangoTokenCache[cacheKey] = { token, expiresAt: Date.now() + 55 * 60 * 1000 };
+          // Use Nango's reported expiry if available, otherwise fall back to 55 min
+          const expiresAt = parsed?.credentials?.expires_at;
+          let cacheTTL;
+          if (expiresAt) {
+            // Cache until 2 min before expiry (safety margin)
+            cacheTTL = new Date(expiresAt).getTime() - Date.now() - 2 * 60 * 1000;
+            if (cacheTTL < 0) cacheTTL = 0; // already expired, don't cache
+          } else {
+            cacheTTL = 55 * 60 * 1000; // fallback: 55 min
+          }
+
+          if (cacheTTL > 0) {
+            _nangoTokenCache[cacheKey] = { token, expiresAt: Date.now() + cacheTTL };
+          } else {
+            // Token is expired or about to expire - don't cache
+            delete _nangoTokenCache[cacheKey];
+          }
+
+          const hasRefresh = !!(parsed?.credentials?.refresh_token);
+          if (!hasRefresh) {
+            console.warn(`[Nango] WARNING: No refresh_token for ${provider}:${connectionId}. Token will not auto-refresh. Re-authorize at app.nango.dev.`);
+          }
+
           resolve(token);
         } catch (e) {
           reject(new Error(`Nango: failed to parse response: ${data.slice(0, 200)}`));
@@ -229,6 +259,18 @@ async function getNangoTokenFor(provider, connectionId) {
     req.on("error", reject);
     req.end();
   });
+}
+
+/**
+ * Clear cached Nango token for a provider:connectionId pair.
+ * Used when a downstream API returns 401 to force a fresh token on retry.
+ */
+function clearNangoTokenCache(provider, connectionId) {
+  const cacheKey = `${provider}:${connectionId}`;
+  if (_nangoTokenCache[cacheKey]) {
+    console.log(`[Nango] Clearing cached token for ${cacheKey}`);
+    delete _nangoTokenCache[cacheKey];
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -287,10 +329,30 @@ function gmailRequest({ method, path, body, query, token }) {
   });
 }
 
-// Convenience: get token then call Gmail
+// Convenience: get token then call Gmail, with automatic 401 retry
 async function nangoRequest({ method, path, body, query }) {
+  const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
+  const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+
   const token = await getNangoToken();
-  return gmailRequest({ method, path, body, query, token });
+  const result = await gmailRequest({ method, path, body, query, token });
+
+  // On 401 from Gmail: clear cache, force-refresh token from Nango, retry once
+  if (result.status === 401 && CONNECTION_ID) {
+    console.warn(`[Gmail] 401 received - clearing cache and force-refreshing token from Nango`);
+    clearNangoTokenCache(PROVIDER_CONFIG_KEY, CONNECTION_ID);
+    try {
+      const freshToken = await getNangoTokenFor(PROVIDER_CONFIG_KEY, CONNECTION_ID, true);
+      console.log(`[Gmail] Retrying with force-refreshed token`);
+      return gmailRequest({ method, path, body, query, token: freshToken });
+    } catch (refreshErr) {
+      console.error(`[Gmail] Force-refresh failed:`, refreshErr.message);
+      // Return original 401 result - the token is truly dead
+      return result;
+    }
+  }
+
+  return result;
 }
 
 // --------------------------------------------------------------------------
@@ -656,6 +718,16 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
           if (proxyRes.statusCode === 401 && config.oauth && _oauthTokenCache[serviceName]) {
             console.warn(`[QB OAuth] 401 received from ${serviceName} - clearing token cache, next request will auto-refresh`);
             delete _oauthTokenCache[serviceName];
+          }
+          // On 401 from a Nango-backed service, clear the Nango token cache
+          if (proxyRes.statusCode === 401 && config.nango) {
+            const nangoConf = config.nango;
+            const provider = nangoConf.provider || (nangoConf.providerEnv && process.env[nangoConf.providerEnv]) || "google";
+            const connectionId = nangoConf.connectionId || (nangoConf.connectionIdEnv && process.env[nangoConf.connectionIdEnv]);
+            if (connectionId) {
+              console.warn(`[Nango] 401 received from ${serviceName} - clearing token cache for next request`);
+              clearNangoTokenCache(provider, connectionId);
+            }
           }
         },
         error: (err, req, res) => {
