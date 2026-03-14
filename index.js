@@ -905,7 +905,7 @@ app.post("/api/gmail/messages/:id/modify", async (req, res) => {
     const result = await gmailAuthRequest({
       method: "POST",
       path: `/users/me/messages/${id}/modify`,
-      body: JSON.stringify({ addLabelIds: addLabelIds || [], removeLabelIds: removeLabelIds || [] }),
+      body: { addLabelIds: addLabelIds || [], removeLabelIds: removeLabelIds || [] },
     });
 
     if (result.status >= 200 && result.status < 300) {
