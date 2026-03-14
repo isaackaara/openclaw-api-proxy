@@ -204,13 +204,22 @@ app.get("/health", (req, res) => {
     process.env.NANGO_CONNECTION_ID &&
     process.env.NANGO_PROVIDER_CONFIG_KEY
   );
+  const directOAuthConfigured = hasGmailDirectOAuth();
   const nangoSheetsConfigured = !!process.env.NANGO_SECRET_KEY;
+  const gmailAuthMethod = directOAuthConfigured
+    ? "direct-oauth (refresh token)"
+    : hasServiceAccount()
+    ? "service-account (JWT)"
+    : nangoConfigured
+    ? "nango (OAuth)"
+    : "NOT CONFIGURED";
   res.json({
     status: "ok",
     services,
     gmail: {
-      configured: nangoConfigured || hasServiceAccount(),
-      authMethod: hasServiceAccount() ? "service-account (JWT)" : nangoConfigured ? "nango (OAuth)" : "NOT CONFIGURED",
+      configured: directOAuthConfigured || hasServiceAccount() || nangoConfigured,
+      authMethod: gmailAuthMethod,
+      directOAuth: { configured: directOAuthConfigured },
       serviceAccount: hasServiceAccount() ? { configured: true, impersonating: GMAIL_IMPERSONATE_EMAIL } : { configured: false },
       nango: { configured: nangoConfigured },
       endpoints: [
@@ -465,14 +474,105 @@ function gmailRequest({ method, path, body, query, token }) {
   });
 }
 
+// --------------------------------------------------------------------------
+// Gmail Direct OAuth: refresh token flow (same pattern as QB/YNAB)
+// Priority: Direct OAuth > Service Account (JWT) > Nango (OAuth)
+// --------------------------------------------------------------------------
+const _gmailDirectTokenCache = {};
+
+/**
+ * Check if direct Gmail OAuth credentials are configured.
+ */
+function hasGmailDirectOAuth() {
+  return !!(
+    process.env.GMAIL_CLIENT_ID &&
+    process.env.GMAIL_CLIENT_SECRET &&
+    process.env.GMAIL_REFRESH_TOKEN
+  );
+}
+
+/**
+ * Get Gmail access token using direct OAuth refresh token.
+ * Caches until 5 min before expiry.
+ */
+async function getGmailDirectToken(forceRefresh = false) {
+  const cacheKey = "gmail-direct";
+  if (!forceRefresh) {
+    const cached = _gmailDirectTokenCache[cacheKey];
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.accessToken;
+    }
+  }
+
+  const clientId = process.env.GMAIL_CLIENT_ID;
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET;
+  const refreshToken = process.env.GMAIL_REFRESH_TOKEN;
+
+  return new Promise((resolve, reject) => {
+    const body = [
+      `grant_type=refresh_token`,
+      `refresh_token=${encodeURIComponent(refreshToken)}`,
+      `client_id=${encodeURIComponent(clientId)}`,
+      `client_secret=${encodeURIComponent(clientSecret)}`,
+    ].join("&");
+
+    const options = {
+      hostname: "oauth2.googleapis.com",
+      port: 443,
+      path: "/token",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+        Accept: "application/json",
+      },
+    };
+
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (!parsed.access_token) {
+            return reject(
+              new Error(`Gmail Direct OAuth: no access_token (HTTP ${resp.statusCode}): ${data.slice(0, 300)}`)
+            );
+          }
+          const expiresIn = parsed.expires_in || 3600;
+          const ttl = (expiresIn - 300) * 1000; // refresh 5 min early
+          if (ttl > 0) {
+            _gmailDirectTokenCache[cacheKey] = {
+              accessToken: parsed.access_token,
+              expiresAt: Date.now() + ttl,
+            };
+          }
+          console.log(`[Gmail Direct OAuth] Refreshed access token, expires in ${expiresIn}s`);
+          resolve(parsed.access_token);
+        } catch (e) {
+          reject(new Error(`Gmail Direct OAuth: failed to parse response: ${data.slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 // Convenience: get token then call Gmail, with automatic 401 retry
-// Priority: Service Account (JWT) > Nango (OAuth)
+// Priority: Direct OAuth > Service Account (JWT) > Nango (OAuth)
 async function getGmailToken() {
-  // Service Account takes priority - it never expires, no refresh token needed
+  // 1. Direct OAuth (same pattern as QB/YNAB - permanent, no third-party dependency)
+  if (hasGmailDirectOAuth()) {
+    return { token: await getGmailDirectToken(), source: "direct-oauth" };
+  }
+  // 2. Service Account (JWT) - domain-wide delegation, never expires
   if (hasServiceAccount()) {
     return { token: await getServiceAccountToken(GMAIL_IMPERSONATE_EMAIL, GMAIL_SCOPES), source: "service-account" };
   }
-  // Fall back to Nango OAuth
+  // 3. Nango OAuth (legacy fallback)
   return { token: await getNangoToken(), source: "nango" };
 }
 
@@ -484,7 +584,17 @@ async function gmailAuthRequest({ method, path, body, query }) {
   if (result.status === 401) {
     console.warn(`[Gmail] 401 received (source: ${source}) - retrying with fresh token`);
 
-    if (source === "service-account") {
+    if (source === "direct-oauth") {
+      // Clear direct OAuth cache and force-refresh
+      delete _gmailDirectTokenCache["gmail-direct"];
+      try {
+        const freshToken = await getGmailDirectToken(true);
+        return gmailRequest({ method, path, body, query, token: freshToken });
+      } catch (err) {
+        console.error(`[Gmail] Direct OAuth refresh failed:`, err.message);
+        return result;
+      }
+    } else if (source === "service-account") {
       // Clear service account cache and get a fresh token
       const cacheKey = `sa:${GMAIL_IMPERSONATE_EMAIL}:${GMAIL_SCOPES.join(",")}`;
       delete _serviceAccountTokenCache[cacheKey];
@@ -921,11 +1031,10 @@ app.listen(PORT, () => {
     process.env.NANGO_CONNECTION_ID &&
     process.env.NANGO_PROVIDER_CONFIG_KEY
   );
-  console.log(`Gmail (Nango): ${nangoReady ? "configured" : "NOT configured"}`);
+  console.log(`Gmail (Direct OAuth): ${hasGmailDirectOAuth() ? "configured" : "NOT configured"}`);
   console.log(`Gmail (Service Account): ${hasServiceAccount() ? `configured, impersonating ${GMAIL_IMPERSONATE_EMAIL}` : "NOT configured"}`);
-  if (hasServiceAccount()) {
-    console.log(`Gmail auth priority: Service Account (JWT) > Nango (OAuth)`);
-  }
+  console.log(`Gmail (Nango): ${nangoReady ? "configured" : "NOT configured"}`);
+  console.log(`Gmail auth priority: Direct OAuth > Service Account (JWT) > Nango (OAuth)`);
 });
 
 module.exports = app;
