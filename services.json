@@ -6,10 +6,16 @@
     "authPrefix": "Bearer"
   },
   "ynab": {
-    "baseUrl": "https://api.youneedabudget.com",
-    "keyEnv": "YNAB_API_KEY",
+    "baseUrl": "https://api.ynab.com",
+    "keyEnv": "YNAB_REFRESH_TOKEN",
     "authHeader": "Authorization",
-    "authPrefix": "Bearer"
+    "authPrefix": "Bearer",
+    "oauth": {
+      "clientIdEnv": "YNAB_CLIENT_ID",
+      "clientSecretEnv": "YNAB_CLIENT_SECRET",
+      "tokenUrl": "https://app.youneedabudget.com/oauth/token",
+      "grantType": "refresh_token"
+    }
   },
   "openrouter": {
     "baseUrl": "https://openrouter.ai/api",

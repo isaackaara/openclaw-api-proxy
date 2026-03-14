@@ -570,8 +570,8 @@ app.delete("/api/gmail/messages/:id", async (req, res) => {
 // --------------------------------------------------------------------------
 Object.entries(SERVICES).forEach(([serviceName, config]) => {
   app.use(`/proxy/${serviceName}`, (req, res, next) => {
-    // Skip env-var check for Nango-backed or QB OAuth services - they check their own vars in the token middleware
-    if (config.nango) return next();
+    // Skip env-var check for Nango-backed or OAuth services - they check their own vars in the token middleware
+    if (config.nango || config.oauth) return next();
     const apiKey = process.env[config.keyEnv];
     if (!apiKey) {
       return res.status(503).json({
