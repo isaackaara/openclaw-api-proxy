@@ -891,6 +891,36 @@ app.delete("/api/gmail/messages/:id", async (req, res) => {
   }
 });
 
+/**
+ * POST /api/gmail/messages/:id/modify
+ * Modify labels on a message (e.g. archive by removing INBOX label)
+ * Body: { addLabelIds: [...], removeLabelIds: [...] }
+ * Returns: { success: true, message: { id, labelIds } }
+ */
+app.post("/api/gmail/messages/:id/modify", async (req, res) => {
+  const { id } = req.params;
+  const { addLabelIds, removeLabelIds } = req.body || {};
+
+  try {
+    const result = await gmailAuthRequest({
+      method: "POST",
+      path: `/users/me/messages/${id}/modify`,
+      body: JSON.stringify({ addLabelIds: addLabelIds || [], removeLabelIds: removeLabelIds || [] }),
+    });
+
+    if (result.status >= 200 && result.status < 300) {
+      return res.status(200).json({
+        success: true,
+        message: result.body,
+      });
+    }
+    return res.status(result.status).json({ error: "Gmail API error", detail: result.body });
+  } catch (err) {
+    console.error("[gmail/messages/:id/modify] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // --------------------------------------------------------------------------
 // Dynamic proxy: /proxy/:service/*  (existing API key services)
 // --------------------------------------------------------------------------
