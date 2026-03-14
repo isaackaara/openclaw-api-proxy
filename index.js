@@ -15,6 +15,139 @@ const https = require("https");
 
 const crypto = require("crypto");
 
+// --------------------------------------------------------------------------
+// Google Service Account JWT auth (domain-wide delegation)
+// No external dependencies - uses Node's built-in crypto module
+// --------------------------------------------------------------------------
+const _serviceAccountTokenCache = {};
+
+/**
+ * Base64url encode a buffer or string (no padding).
+ */
+function base64url(input) {
+  const buf = typeof input === "string" ? Buffer.from(input) : input;
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Create a signed JWT for Google Service Account authentication.
+ * @param {object} serviceAccountKey - parsed JSON key file
+ * @param {string[]} scopes - OAuth scopes to request
+ * @param {string} impersonateEmail - email to impersonate (domain-wide delegation)
+ */
+function createServiceAccountJWT(serviceAccountKey, scopes, impersonateEmail) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = {
+    iss: serviceAccountKey.client_email,
+    sub: impersonateEmail,
+    scope: scopes.join(" "),
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600, // 1 hour
+  };
+
+  const headerB64 = base64url(JSON.stringify(header));
+  const payloadB64 = base64url(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+
+  const sign = crypto.createSign("RSA-SHA256");
+  sign.update(signingInput);
+  const signature = sign.sign(serviceAccountKey.private_key);
+
+  return `${signingInput}.${base64url(signature)}`;
+}
+
+/**
+ * Get an access token using Google Service Account JWT.
+ * Caches tokens until 2 min before expiry.
+ * @param {string} impersonateEmail - email to impersonate
+ * @param {string[]} scopes - OAuth scopes
+ * @returns {Promise<string>} access token
+ */
+async function getServiceAccountToken(impersonateEmail, scopes) {
+  const cacheKey = `sa:${impersonateEmail}:${scopes.join(",")}`;
+  const cached = _serviceAccountTokenCache[cacheKey];
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token;
+  }
+
+  const keyJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!keyJson) throw new Error("GOOGLE_SERVICE_ACCOUNT_KEY not configured");
+
+  let serviceAccountKey;
+  try {
+    serviceAccountKey = JSON.parse(keyJson);
+  } catch (e) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_KEY is not valid JSON");
+  }
+
+  if (!serviceAccountKey.private_key || !serviceAccountKey.client_email) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_KEY missing private_key or client_email");
+  }
+
+  const jwt = createServiceAccountJWT(serviceAccountKey, scopes, impersonateEmail);
+
+  return new Promise((resolve, reject) => {
+    const body = `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${encodeURIComponent(jwt)}`;
+    const options = {
+      hostname: "oauth2.googleapis.com",
+      port: 443,
+      path: "/token",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    };
+
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (!parsed.access_token) {
+            return reject(new Error(`Service Account token exchange failed (HTTP ${resp.statusCode}): ${data.slice(0, 300)}`));
+          }
+          const expiresIn = parsed.expires_in || 3600;
+          // Cache until 2 min before expiry
+          const ttl = (expiresIn - 120) * 1000;
+          if (ttl > 0) {
+            _serviceAccountTokenCache[cacheKey] = {
+              token: parsed.access_token,
+              expiresAt: Date.now() + ttl,
+            };
+          }
+          console.log(`[ServiceAccount] Got access token for ${impersonateEmail}, expires in ${expiresIn}s`);
+          resolve(parsed.access_token);
+        } catch (e) {
+          reject(new Error(`Service Account: failed to parse token response: ${data.slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Check if service account auth is available.
+ */
+function hasServiceAccount() {
+  return !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+}
+
+const GMAIL_SCOPES = [
+  "https://mail.google.com/",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.send",
+];
+
+const GMAIL_IMPERSONATE_EMAIL = process.env.GMAIL_IMPERSONATE_EMAIL || "isaac@kaara.works";
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -76,7 +209,10 @@ app.get("/health", (req, res) => {
     status: "ok",
     services,
     gmail: {
-      configured: nangoConfigured,
+      configured: nangoConfigured || hasServiceAccount(),
+      authMethod: hasServiceAccount() ? "service-account (JWT)" : nangoConfigured ? "nango (OAuth)" : "NOT CONFIGURED",
+      serviceAccount: hasServiceAccount() ? { configured: true, impersonating: GMAIL_IMPERSONATE_EMAIL } : { configured: false },
+      nango: { configured: nangoConfigured },
       endpoints: [
         "POST /api/gmail/drafts/create",
         "POST /api/gmail/drafts/send",
@@ -330,25 +466,49 @@ function gmailRequest({ method, path, body, query, token }) {
 }
 
 // Convenience: get token then call Gmail, with automatic 401 retry
-async function nangoRequest({ method, path, body, query }) {
-  const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
-  const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+// Priority: Service Account (JWT) > Nango (OAuth)
+async function getGmailToken() {
+  // Service Account takes priority - it never expires, no refresh token needed
+  if (hasServiceAccount()) {
+    return { token: await getServiceAccountToken(GMAIL_IMPERSONATE_EMAIL, GMAIL_SCOPES), source: "service-account" };
+  }
+  // Fall back to Nango OAuth
+  return { token: await getNangoToken(), source: "nango" };
+}
 
-  const token = await getNangoToken();
+async function gmailAuthRequest({ method, path, body, query }) {
+  const { token, source } = await getGmailToken();
   const result = await gmailRequest({ method, path, body, query, token });
 
-  // On 401 from Gmail: clear cache, force-refresh token from Nango, retry once
-  if (result.status === 401 && CONNECTION_ID) {
-    console.warn(`[Gmail] 401 received - clearing cache and force-refreshing token from Nango`);
-    clearNangoTokenCache(PROVIDER_CONFIG_KEY, CONNECTION_ID);
-    try {
-      const freshToken = await getNangoTokenFor(PROVIDER_CONFIG_KEY, CONNECTION_ID, true);
-      console.log(`[Gmail] Retrying with force-refreshed token`);
-      return gmailRequest({ method, path, body, query, token: freshToken });
-    } catch (refreshErr) {
-      console.error(`[Gmail] Force-refresh failed:`, refreshErr.message);
-      // Return original 401 result - the token is truly dead
-      return result;
+  // On 401: retry with fresh token
+  if (result.status === 401) {
+    console.warn(`[Gmail] 401 received (source: ${source}) - retrying with fresh token`);
+
+    if (source === "service-account") {
+      // Clear service account cache and get a fresh token
+      const cacheKey = `sa:${GMAIL_IMPERSONATE_EMAIL}:${GMAIL_SCOPES.join(",")}`;
+      delete _serviceAccountTokenCache[cacheKey];
+      try {
+        const freshToken = await getServiceAccountToken(GMAIL_IMPERSONATE_EMAIL, GMAIL_SCOPES);
+        return gmailRequest({ method, path, body, query, token: freshToken });
+      } catch (err) {
+        console.error(`[Gmail] Service account refresh failed:`, err.message);
+        return result;
+      }
+    } else {
+      // Nango path: clear cache, force-refresh
+      const CONNECTION_ID = process.env.NANGO_CONNECTION_ID;
+      const PROVIDER_CONFIG_KEY = process.env.NANGO_PROVIDER_CONFIG_KEY || "google";
+      if (CONNECTION_ID) {
+        clearNangoTokenCache(PROVIDER_CONFIG_KEY, CONNECTION_ID);
+        try {
+          const freshToken = await getNangoTokenFor(PROVIDER_CONFIG_KEY, CONNECTION_ID, true);
+          return gmailRequest({ method, path, body, query, token: freshToken });
+        } catch (refreshErr) {
+          console.error(`[Gmail] Nango force-refresh failed:`, refreshErr.message);
+          return result;
+        }
+      }
     }
   }
 
@@ -427,7 +587,7 @@ app.post("/api/gmail/drafts/create", async (req, res) => {
   const raw = buildRawEmail({ to, from, subject, body, bodyHtml, cc, bcc, replyTo });
 
   try {
-    const result = await nangoRequest({
+    const result = await gmailAuthRequest({
       method: "POST",
       path: "/users/me/drafts",
       body: { message: { raw } },
@@ -461,7 +621,7 @@ app.post("/api/gmail/drafts/send", async (req, res) => {
   }
 
   try {
-    const result = await nangoRequest({
+    const result = await gmailAuthRequest({
       method: "POST",
       path: "/users/me/drafts/send",
       body: { id: draftId },
@@ -498,7 +658,7 @@ app.post("/api/gmail/messages/send", async (req, res) => {
   const raw = buildRawEmail({ to, from, subject, body, bodyHtml, cc, bcc, replyTo });
 
   try {
-    const result = await nangoRequest({
+    const result = await gmailAuthRequest({
       method: "POST",
       path: "/users/me/messages/send",
       body: { raw },
@@ -534,7 +694,7 @@ app.get("/api/gmail/messages", async (req, res) => {
   if (labelIds) query.labelIds = labelIds;
 
   try {
-    const result = await nangoRequest({
+    const result = await gmailAuthRequest({
       method: "GET",
       path: "/users/me/messages",
       query,
@@ -567,7 +727,7 @@ app.get("/api/gmail/messages/:id", async (req, res) => {
   if (format) query.format = format;
 
   try {
-    const result = await nangoRequest({
+    const result = await gmailAuthRequest({
       method: "GET",
       path: `/users/me/messages/${id}`,
       query: Object.keys(query).length ? query : undefined,
@@ -595,12 +755,12 @@ app.delete("/api/gmail/messages/:id", async (req, res) => {
   try {
     let result;
     if (permanent) {
-      result = await nangoRequest({
+      result = await gmailAuthRequest({
         method: "DELETE",
         path: `/users/me/messages/${id}`,
       });
     } else {
-      result = await nangoRequest({
+      result = await gmailAuthRequest({
         method: "POST",
         path: `/users/me/messages/${id}/trash`,
       });
@@ -762,6 +922,10 @@ app.listen(PORT, () => {
     process.env.NANGO_PROVIDER_CONFIG_KEY
   );
   console.log(`Gmail (Nango): ${nangoReady ? "configured" : "NOT configured"}`);
+  console.log(`Gmail (Service Account): ${hasServiceAccount() ? `configured, impersonating ${GMAIL_IMPERSONATE_EMAIL}` : "NOT configured"}`);
+  if (hasServiceAccount()) {
+    console.log(`Gmail auth priority: Service Account (JWT) > Nango (OAuth)`);
+  }
 });
 
 module.exports = app;
