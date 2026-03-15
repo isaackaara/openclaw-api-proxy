@@ -1,7 +1,25 @@
 {
+  "openai": {
+    "baseUrl": "https://api.openai.com",
+    "keyEnv": "OPENAI_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "anthropic": {
+    "baseUrl": "https://api.anthropic.com",
+    "keyEnv": "ANTHROPIC_API_KEY",
+    "authHeader": "x-api-key",
+    "authPrefix": ""
+  },
   "resend": {
     "baseUrl": "https://api.resend.com",
     "keyEnv": "RESEND_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "sendgrid": {
+    "baseUrl": "https://api.sendgrid.com",
+    "keyEnv": "SENDGRID_API_KEY",
     "authHeader": "Authorization",
     "authPrefix": "Bearer"
   },
@@ -29,6 +47,30 @@
     "authHeader": "Authorization",
     "authPrefix": "Bearer"
   },
+  "notion": {
+    "baseUrl": "https://api.notion.com",
+    "keyEnv": "NOTION_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "airtable": {
+    "baseUrl": "https://api.airtable.com",
+    "keyEnv": "AIRTABLE_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "linear": {
+    "baseUrl": "https://api.linear.app",
+    "keyEnv": "LINEAR_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
+  "hubspot": {
+    "baseUrl": "https://api.hubapi.com",
+    "keyEnv": "HUBSPOT_API_KEY",
+    "authHeader": "Authorization",
+    "authPrefix": "Bearer"
+  },
   "cloudflare": {
     "baseUrl": "https://api.cloudflare.com/client/v4",
     "keyEnv": "CLOUDFLARE_API_TOKEN",
@@ -38,12 +80,6 @@
   "safaricom-daraja": {
     "baseUrl": "https://api.safaricom.co.ke",
     "keyEnv": "DARAJA_ACCESS_TOKEN",
-    "authHeader": "Authorization",
-    "authPrefix": "Bearer"
-  },
-  "google-calendar": {
-    "baseUrl": "https://www.googleapis.com/calendar",
-    "keyEnv": "GOOGLE_API_KEY",
     "authHeader": "Authorization",
     "authPrefix": "Bearer"
   },

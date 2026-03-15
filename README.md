@@ -19,7 +19,7 @@ When an AI agent calls an external API directly, the API key ends up in the agen
 **The zero-knowledge pattern:** agents call the proxy using a service name only (e.g. `resend`). The proxy looks up the real API key from environment variables and forwards the request. The agent never touches the key.
 
 ```
-Agent  -->  proxy/resend/emails  -->  (proxy injects RESEND_API_KEY)  -->  api.resend.com
+Agent  -->  proxy/openai/chat/completions  -->  (proxy injects OPENAI_API_KEY)  -->  api.openai.com
 ```
 
 ---
@@ -74,8 +74,8 @@ The service registry lives in `services.json` at the project root. Each entry ma
 |-------|-------------|
 | `baseUrl` | The real API base URL |
 | `keyEnv` | Environment variable name holding the API key |
-| `authHeader` | HTTP header to inject (usually `Authorization`) |
-| `authPrefix` | Header value prefix (usually `Bearer`) |
+| `authHeader` | HTTP header to inject (e.g. `Authorization` or `x-api-key`) |
+| `authPrefix` | Header value prefix (e.g. `Bearer`; leave empty for raw key) |
 
 Example entry:
 
@@ -94,23 +94,33 @@ To add a new service, add an entry to `services.json` and restart.
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `PORT` | No | Port to listen on (default: `3000`) |
-| `PROXY_AUTH_TOKEN` | No | Bearer token to guard the proxy. Leave blank for open access (use only on private networks). |
-| `RESEND_API_KEY` | No | Resend API key |
-| `YNAB_API_KEY` | No | YNAB personal access token |
-| `OPENROUTER_API_KEY` | No | OpenRouter API key |
-| `GITHUB_TOKEN` | No | GitHub personal access token |
-| `CLOUDFLARE_API_TOKEN` | No | Cloudflare API token |
-| `DARAJA_ACCESS_TOKEN` | No | Safaricom Daraja access token |
-| `GOOGLE_API_KEY` | No | Google API key |
-| `STRIPE_SECRET_KEY` | No | Stripe secret key |
-| `SLACK_BOT_TOKEN` | No | Slack bot token |
-| `TWILIO_AUTH_TOKEN` | No | Twilio auth token |
-| `GOOGLE_SHEETS_TOKEN` | No | Leave blank - auto-fetched via Nango (provider: google, connectionId: isaac-google) |
+| Variable | Description |
+|----------|-------------|
+| `PORT` | Port to listen on (default: `3000`) |
+| `PROXY_AUTH_TOKEN` | Bearer token to guard the proxy. If unset, a random token is generated on startup and printed to logs. |
+| `OPENAI_API_KEY` | OpenAI API key |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `RESEND_API_KEY` | Resend API key |
+| `SENDGRID_API_KEY` | SendGrid API key |
+| `YNAB_REFRESH_TOKEN` | YNAB OAuth refresh token |
+| `YNAB_CLIENT_ID` | YNAB OAuth client ID |
+| `YNAB_CLIENT_SECRET` | YNAB OAuth client secret |
+| `OPENROUTER_API_KEY` | OpenRouter API key |
+| `GITHUB_TOKEN` | GitHub personal access token |
+| `NOTION_API_KEY` | Notion integration token |
+| `AIRTABLE_API_KEY` | Airtable personal access token |
+| `LINEAR_API_KEY` | Linear API key |
+| `HUBSPOT_API_KEY` | HubSpot private app token |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token |
+| `STRIPE_SECRET_KEY` | Stripe secret key |
+| `SLACK_BOT_TOKEN` | Slack bot token |
+| `TWILIO_AUTH_TOKEN` | Twilio auth token |
+| `QUICKBOOKS_REFRESH_TOKEN` | QuickBooks OAuth refresh token |
+| `QUICKBOOKS_CLIENT_ID` | QuickBooks OAuth client ID |
+| `QUICKBOOKS_CLIENT_SECRET` | QuickBooks OAuth client secret |
+| `DARAJA_ACCESS_TOKEN` | Safaricom Daraja access token |
 
-Only set the keys you need. Unset services still work at the proxy level; they just forward without an auth header.
+Only set the keys you need. Unconfigured services return a clear `503` with instructions.
 
 ---
 
@@ -122,17 +132,6 @@ Only set the keys you need. Unset services still work at the proxy level; they j
 curl http://localhost:3000/health
 ```
 
-Response:
-```json
-{
-  "status": "ok",
-  "services": [
-    { "name": "resend", "configured": true },
-    { "name": "ynab", "configured": false }
-  ]
-}
-```
-
 ### List services
 
 ```bash
@@ -142,6 +141,28 @@ curl http://localhost:3000/services
 ### Make a proxied request
 
 Replace the real API base URL with `http://localhost:3000/proxy/:service`.
+
+**OpenAI - chat completion**
+```bash
+curl -X POST http://localhost:3000/proxy/openai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{ "role": "user", "content": "Hello" }]
+  }'
+```
+
+**Anthropic - messages**
+```bash
+curl -X POST http://localhost:3000/proxy/anthropic/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-3-5-haiku-20241022",
+    "max_tokens": 1024,
+    "messages": [{ "role": "user", "content": "Hello" }]
+  }'
+```
 
 **Resend - send an email**
 ```bash
@@ -155,19 +176,11 @@ curl -X POST http://localhost:3000/proxy/resend/emails \
   }'
 ```
 
-**YNAB - get budgets**
+**Notion - query a database**
 ```bash
-curl http://localhost:3000/proxy/ynab/v1/budgets
-```
-
-**OpenRouter - chat completion**
-```bash
-curl -X POST http://localhost:3000/proxy/openrouter/v1/chat/completions \
+curl -X POST http://localhost:3000/proxy/notion/v1/databases/DATABASE_ID/query \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "openai/gpt-4o-mini",
-    "messages": [{ "role": "user", "content": "Hello" }]
-  }'
+  -H "Notion-Version: 2022-06-28"
 ```
 
 **GitHub - list repos**
@@ -180,17 +193,11 @@ curl http://localhost:3000/proxy/github/user/repos
 curl http://localhost:3000/proxy/stripe/v1/customers
 ```
 
-**Slack - post message**
+**Linear - list issues (GraphQL)**
 ```bash
-curl -X POST http://localhost:3000/proxy/slack/chat.postMessage \
+curl -X POST http://localhost:3000/proxy/linear/graphql \
   -H "Content-Type: application/json" \
-  -d '{ "channel": "#general", "text": "Hello from the proxy" }'
-```
-
-**Twilio - send SMS**
-```bash
-curl -X POST "http://localhost:3000/proxy/twilio/2010-04-01/Accounts/ACXXXX/Messages.json" \
-  -d "To=%2B254700000000&From=%2B1234567890&Body=Hello"
+  -d '{ "query": "{ viewer { id name } }" }'
 ```
 
 ### With proxy auth guard enabled
@@ -198,7 +205,7 @@ curl -X POST "http://localhost:3000/proxy/twilio/2010-04-01/Accounts/ACXXXX/Mess
 If `PROXY_AUTH_TOKEN` is set, include it as a Bearer token:
 
 ```bash
-curl http://localhost:3000/proxy/ynab/v1/budgets \
+curl http://localhost:3000/proxy/openai/v1/models \
   -H "Authorization: Bearer your-proxy-token"
 ```
 
@@ -209,37 +216,73 @@ curl http://localhost:3000/proxy/ynab/v1/budgets \
 1. Agent sends a request to `/proxy/:service/path`.
 2. The proxy looks up `:service` in `services.json`.
 3. It reads the API key from the environment variable named in `keyEnv`.
-4. It **removes** any `Authorization` header the agent supplied (never trust agent-provided keys).
+4. It **removes** any auth header the agent supplied (never trust agent-provided keys).
 5. It injects the real key as the correct auth header.
 6. It forwards the request to the real API base URL.
 7. The response is streamed back to the agent.
 
-The agent only ever sees:
-- The service name (e.g. `resend`)
-- The request path and body
-- The response body
-
-The agent never sees the API key value.
+The agent only ever sees the service name, the request path and body, and the response. The key value never leaves the server.
 
 ---
 
 ## Supported Services
 
-| Service | Service Name | Env Variable |
-|---------|-------------|--------------|
-| Resend | `resend` | `RESEND_API_KEY` |
-| YNAB | `ynab` | `YNAB_API_KEY` |
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
-| GitHub | `github` | `GITHUB_TOKEN` |
-| Cloudflare | `cloudflare` | `CLOUDFLARE_API_TOKEN` |
-| Safaricom Daraja | `safaricom-daraja` | `DARAJA_ACCESS_TOKEN` |
-| Google Calendar | `google-calendar` | `GOOGLE_API_KEY` |
-| Stripe | `stripe` | `STRIPE_SECRET_KEY` |
-| Slack | `slack` | `SLACK_BOT_TOKEN` |
-| Twilio | `twilio` | `TWILIO_AUTH_TOKEN` |
-| Google Sheets | `google-sheets` | via Nango `isaac-google` (leave `GOOGLE_SHEETS_TOKEN` blank) |
+| Service | Service Name | Env Variable | Auth Type |
+|---------|-------------|--------------|-----------|
+| OpenAI | `openai` | `OPENAI_API_KEY` | Bearer |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | x-api-key |
+| Resend | `resend` | `RESEND_API_KEY` | Bearer |
+| SendGrid | `sendgrid` | `SENDGRID_API_KEY` | Bearer |
+| YNAB | `ynab` | `YNAB_REFRESH_TOKEN` | OAuth (auto-refresh) |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | Bearer |
+| GitHub | `github` | `GITHUB_TOKEN` | Bearer |
+| Notion | `notion` | `NOTION_API_KEY` | Bearer |
+| Airtable | `airtable` | `AIRTABLE_API_KEY` | Bearer |
+| Linear | `linear` | `LINEAR_API_KEY` | Bearer |
+| HubSpot | `hubspot` | `HUBSPOT_API_KEY` | Bearer |
+| Stripe | `stripe` | `STRIPE_SECRET_KEY` | Bearer |
+| Slack | `slack` | `SLACK_BOT_TOKEN` | Bearer |
+| Twilio | `twilio` | `TWILIO_AUTH_TOKEN` | Bearer |
+| Cloudflare | `cloudflare` | `CLOUDFLARE_API_TOKEN` | Bearer |
+| QuickBooks | `quickbooks` | `QUICKBOOKS_REFRESH_TOKEN` | OAuth (auto-refresh) |
+| Safaricom Daraja | `safaricom-daraja` | `DARAJA_ACCESS_TOKEN` | Bearer |
+| Google Sheets | `google-sheets` | via Nango | OAuth (Nango) |
 
 Adding more services is a one-line edit in `services.json`.
+
+---
+
+## Gmail Integration
+
+The proxy includes a purpose-built Gmail integration at `/api/gmail/...` that supports three auth methods (in priority order):
+
+1. **Direct OAuth** (recommended) -- provide `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, and `GMAIL_REFRESH_TOKEN`.
+2. **Google Service Account** -- provide `GOOGLE_SERVICE_ACCOUNT_KEY` (JSON) and `GMAIL_IMPERSONATE_EMAIL` for domain-wide delegation.
+3. **Nango OAuth** -- provide `NANGO_SECRET_KEY`, `NANGO_CONNECTION_ID`, and `NANGO_PROVIDER_CONFIG_KEY=google`.
+
+Available endpoints:
+- `POST /api/gmail/drafts/create`
+- `POST /api/gmail/drafts/send`
+- `POST /api/gmail/messages/send`
+- `GET  /api/gmail/messages`
+- `GET  /api/gmail/messages/:id`
+- `DELETE /api/gmail/messages/:id`
+
+---
+
+## Google Sheets Integration
+
+Google Sheets is proxied at `/proxy/google-sheets/...` and fetches OAuth tokens automatically via Nango.
+
+Set these three environment variables to enable it:
+
+| Variable | Description |
+|----------|-------------|
+| `NANGO_SECRET_KEY` | Your Nango secret key |
+| `NANGO_CONNECTION_ID` | The Nango connection ID for your Google account |
+| `NANGO_PROVIDER_CONFIG_KEY` | The Nango provider config key (usually `google`) |
+
+Tokens are cached for 55 minutes and refreshed automatically on expiry or 401 responses.
 
 ---
 
@@ -247,37 +290,34 @@ Adding more services is a one-line edit in `services.json`.
 
 - **Never expose the proxy publicly without `PROXY_AUTH_TOKEN`** unless it runs on a private network.
 - Treat `PROXY_AUTH_TOKEN` like an API key. Rotate it periodically.
-- The proxy logs method + path but never logs key values or request bodies.
-- For production deployments, run behind a reverse proxy (nginx, Caddy) with TLS.
-- Secrets should be injected via your platform's secret management (Railway/Render env vars, Docker secrets, GCP Secret Manager).
+- The proxy logs method and path but never logs key values or request bodies.
+- For production, run behind a reverse proxy (nginx, Caddy) with TLS.
+- Inject secrets via your platform's secret management (Railway/Render env vars, Docker secrets, GCP Secret Manager).
 
 ---
 
 ## Troubleshooting
 
 ### Deploy takes more than 5 minutes
-Check Railway logs (your project → Deployments → latest → Logs). If it's stuck at "Building", it may have hit a Railway quota limit.
-- Out of free credits: Go to [Railway billing](https://railway.com/account/billing) and add a payment method ($5 tops up the free tier).
-- Quota exceeded: Railway shows "Usage limit exceeded" in the deploy log. Upgrade plan or wait for monthly reset.
-- If the deploy hangs indefinitely: Click "Cancel" and redeploy. Railway does not auto-timeout hung deploys.
+Check Railway logs (your project -> Deployments -> latest -> Logs). If stuck at "Building", you may have hit a Railway quota limit. Go to [Railway billing](https://railway.com/account/billing) to check. If the deploy hangs indefinitely, click "Cancel" and redeploy.
 
-### I deployed but my token is gone after a restart
-If you didn't set `PROXY_AUTH_TOKEN` as a Railway environment variable, a new random token is generated each restart. Fix: in Railway dashboard → your project → Variables, set `PROXY_AUTH_TOKEN` to a value you control.
+### My token disappears after a restart
+If you did not set `PROXY_AUTH_TOKEN` as an environment variable, a new random token is generated each restart. Fix: add `PROXY_AUTH_TOKEN` to your Railway Variables with a value you control.
 
-### `/proxy/ynab` returns a 404
-Check that `YNAB_API_KEY` in Railway is a valid, unexpired token. YNAB tokens expire - regenerate at [app.youneedabudget.com/settings](https://app.youneedabudget.com/settings) → Personal Access Tokens. After updating the variable, Railway will redeploy automatically (takes ~90 seconds).
+### `/proxy/ynab` returns 401
+YNAB uses OAuth. Make sure `YNAB_REFRESH_TOKEN`, `YNAB_CLIENT_ID`, and `YNAB_CLIENT_SECRET` are all set. The proxy handles token refresh automatically.
 
-### I updated an env var but the proxy isn't picking it up
-Railway redeploys automatically when you change variables - this takes about 90 seconds. Check the Deployments tab to confirm the redeploy triggered. If not, click "Redeploy" manually.
+### I updated an env var but nothing changed
+Railway redeploys automatically when you change variables -- this takes about 90 seconds. Check the Deployments tab to confirm. If not triggered, click "Redeploy" manually.
 
-### The proxy starts but all services show `configured: false`
-Your API keys are not set. Go to Railway dashboard → Variables and add the keys for the services you want to use. Only set keys you actually need.
+### All services show `configured: false`
+Your API keys are not set. Go to your host's environment variables and add the keys for the services you need.
 
 ---
 
 ## Contributing
 
-PRs welcome. Add new services to `services.json`. Keep `index.js` under 150 lines.
+PRs welcome. Add new services to `services.json` -- no code changes required for standard key-based APIs. Keep `index.js` focused on infrastructure, not service-specific logic.
 
 ---
 
@@ -287,4 +327,4 @@ MIT. See [LICENSE](./LICENSE).
 
 ---
 
-Built by [Kaara Works](https://kaara.works).
+MIT License. Built for the open-source community.

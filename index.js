@@ -146,7 +146,7 @@ const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.send",
 ];
 
-const GMAIL_IMPERSONATE_EMAIL = process.env.GMAIL_IMPERSONATE_EMAIL || "isaac@kaara.works";
+const GMAIL_IMPERSONATE_EMAIL = process.env.GMAIL_IMPERSONATE_EMAIL;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -220,7 +220,7 @@ app.get("/health", (req, res) => {
       configured: directOAuthConfigured || hasServiceAccount() || nangoConfigured,
       authMethod: gmailAuthMethod,
       directOAuth: { configured: directOAuthConfigured },
-      serviceAccount: hasServiceAccount() ? { configured: true, impersonating: GMAIL_IMPERSONATE_EMAIL } : { configured: false },
+      serviceAccount: hasServiceAccount() ? { configured: true, impersonating: GMAIL_IMPERSONATE_EMAIL || "(not set)" } : { configured: false },
       nango: { configured: nangoConfigured },
       endpoints: [
         "POST /api/gmail/drafts/create",
@@ -233,7 +233,7 @@ app.get("/health", (req, res) => {
     },
     "google-sheets": {
       configured: nangoSheetsConfigured,
-      note: "Uses Nango (provider: google, connectionId: isaac-google) - token auto-fetched and cached 55 min",
+      note: "Uses Nango (provider: google, connectionId from NANGO_CONNECTION_ID) - token auto-fetched and cached 55 min",
       endpoint: "GET|POST /proxy/google-sheets/spreadsheets/...",
     },
   });
@@ -1011,7 +1011,7 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
           }
           // Remove any auth header the agent may have sent (never trust agent-supplied keys)
           proxyReq.removeHeader(authHeader);
-          proxyReq.setHeader(authHeader, `${authPrefix} ${apiKey}`);
+          proxyReq.setHeader(authHeader, `${authPrefix} ${apiKey}`.trim());
         },
         proxyRes: (proxyRes, req) => {
           // On 401 from an OAuth-backed service, clear the token cache so the next request forces a refresh
@@ -1062,7 +1062,7 @@ app.listen(PORT, () => {
     process.env.NANGO_PROVIDER_CONFIG_KEY
   );
   console.log(`Gmail (Direct OAuth): ${hasGmailDirectOAuth() ? "configured" : "NOT configured"}`);
-  console.log(`Gmail (Service Account): ${hasServiceAccount() ? `configured, impersonating ${GMAIL_IMPERSONATE_EMAIL}` : "NOT configured"}`);
+  console.log(`Gmail (Service Account): ${hasServiceAccount() ? `configured${GMAIL_IMPERSONATE_EMAIL ? `, impersonating ${GMAIL_IMPERSONATE_EMAIL}` : " (set GMAIL_IMPERSONATE_EMAIL to enable impersonation)"}` : "NOT configured"}`);
   console.log(`Gmail (Nango): ${nangoReady ? "configured" : "NOT configured"}`);
   console.log(`Gmail auth priority: Direct OAuth > Service Account (JWT) > Nango (OAuth)`);
 });
