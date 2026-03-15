@@ -117,10 +117,6 @@
     "baseUrl": "https://sheets.googleapis.com/v4",
     "keyEnv": "GOOGLE_SHEETS_TOKEN",
     "authHeader": "Authorization",
-    "authPrefix": "Bearer",
-    "nango": {
-      "providerEnv": "NANGO_PROVIDER_CONFIG_KEY",
-      "connectionIdEnv": "NANGO_CONNECTION_ID"
-    }
+    "authPrefix": "Bearer"
   }
 }

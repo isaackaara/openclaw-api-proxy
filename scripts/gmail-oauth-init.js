@@ -5,7 +5,7 @@
  *
  * Prerequisites:
  *   1. Go to Google Cloud Console -> APIs & Services -> Credentials
- *      (Project: petrus-crm-488612 or your GCP project)
+ *      (Project: kaara-works-infra)
  *   2. Create an OAuth 2.0 Client ID (type: Desktop app or Web application)
  *   3. Add redirect URI: http://localhost:9877/callback
  *   4. Enable the Gmail API in APIs & Services -> Library

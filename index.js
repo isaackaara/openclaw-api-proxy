@@ -232,9 +232,11 @@ app.get("/health", (req, res) => {
       ],
     },
     "google-sheets": {
-      configured: nangoSheetsConfigured,
-      note: "Uses Nango (provider: google, connectionId from NANGO_CONNECTION_ID) - token auto-fetched and cached 55 min",
+      configured: hasServiceAccount(),
+      authMethod: hasServiceAccount() ? "service-account (JWT)" : "NOT CONFIGURED",
+      impersonating: GMAIL_IMPERSONATE_EMAIL || "isaac@kaara.works",
       endpoint: "GET|POST /proxy/google-sheets/spreadsheets/...",
+      note: "Same service account as Gmail - permanent auth, no expiry",
     },
   });
 });
@@ -982,6 +984,29 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
     }
   });
 }
+
+// Pre-middleware: Google Sheets via service account (same as Gmail)
+app.use('/proxy/google-sheets', async (req, res, next) => {
+  const SHEETS_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
+  const impersonateEmail = GMAIL_IMPERSONATE_EMAIL || 'isaac@kaara.works';
+  
+  if (!hasServiceAccount()) {
+    return res.status(503).json({ 
+      error: "Google Service Account not configured", 
+      service: "google-sheets", 
+      detail: "Set GOOGLE_SERVICE_ACCOUNT_KEY in Railway Variables" 
+    });
+  }
+
+  try {
+    req._nangoToken = await getServiceAccountToken(impersonateEmail, SHEETS_SCOPES);
+    console.log(`[google-sheets] Using service account token (impersonating ${impersonateEmail})`);
+    next();
+  } catch (err) {
+    console.error(`[ERROR] Service account token fetch for google-sheets:`, err.message);
+    res.status(502).json({ error: "Service account token fetch failed", service: "google-sheets", detail: err.message });
+  }
+});
 
 for (const [serviceName, config] of Object.entries(SERVICES)) {
   const { baseUrl, keyEnv, authHeader, authPrefix } = config;
