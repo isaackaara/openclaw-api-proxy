@@ -985,26 +985,17 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
   });
 }
 
-// Pre-middleware: Google Sheets via service account (same as Gmail)
+// Pre-middleware: Google Sheets via Gmail OAuth refresh token (permanent, no service account needed)
 app.use('/proxy/google-sheets', async (req, res, next) => {
-  const SHEETS_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-  const impersonateEmail = GMAIL_IMPERSONATE_EMAIL || 'isaac@kaara.works';
-  
-  if (!hasServiceAccount()) {
-    return res.status(503).json({ 
-      error: "Google Service Account not configured", 
-      service: "google-sheets", 
-      detail: "Set GOOGLE_SERVICE_ACCOUNT_KEY in Railway Variables" 
-    });
-  }
-
   try {
-    req._nangoToken = await getServiceAccountToken(impersonateEmail, SHEETS_SCOPES);
-    console.log(`[google-sheets] Using service account token (impersonating ${impersonateEmail})`);
+    // Reuse the Gmail OAuth token - it already has spreadsheets scope from the combined auth
+    const { token } = await getGmailToken();
+    req._nangoToken = token;
+    console.log(`[google-sheets] Using Gmail OAuth token for Sheets access`);
     next();
   } catch (err) {
-    console.error(`[ERROR] Service account token fetch for google-sheets:`, err.message);
-    res.status(502).json({ error: "Service account token fetch failed", service: "google-sheets", detail: err.message });
+    console.error(`[ERROR] Gmail OAuth token fetch for google-sheets:`, err.message);
+    res.status(502).json({ error: "Gmail OAuth token fetch failed", service: "google-sheets", detail: err.message });
   }
 });
 
