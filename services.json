@@ -115,7 +115,7 @@
   },
   "google-sheets": {
     "baseUrl": "https://sheets.googleapis.com/v4",
-    "keyEnv": "GOOGLE_SHEETS_TOKEN",
+    "keyEnv": "GMAIL_REFRESH_TOKEN",
     "authHeader": "Authorization",
     "authPrefix": "Bearer"
   }
