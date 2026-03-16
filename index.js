@@ -1057,14 +1057,6 @@ for (const [serviceName, config] of Object.entries(SERVICES)) {
   );
 }
 
-// 404 fallback
-app.use((req, res) => {
-  res.status(404).json({
-    error: "Not found",
-    hint: "Use /proxy/:service/... for API key services. Use /api/gmail/... for Gmail via Nango. See /health for all endpoints.",
-  });
-});
-
 // ─── Our Kenya Contribution Form ─────────────────────────────────────────────
 const OK_SHEET_ID = "1WTUD2cVVNfhx7F64Dg7_l47HumOim6rZJb3lkm8f9Fo";
 const OK_ALLOWED_ORIGIN = "https://ourkenya.com";
@@ -1109,6 +1101,14 @@ app.post("/api/contributions", async (req, res) => {
   }
 });
 // ─────────────────────────────────────────────────────────────────────────────
+
+// 404 fallback
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Not found",
+    hint: "Use /proxy/:service/... for API key services. Use /api/gmail/... for Gmail via Nango. See /health for all endpoints.",
+  });
+});
 
 app.listen(PORT, () => {
   console.log(`openclaw-api-proxy listening on port ${PORT}`);
