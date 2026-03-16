@@ -1065,6 +1065,51 @@ app.use((req, res) => {
   });
 });
 
+// ─── Our Kenya Contribution Form ─────────────────────────────────────────────
+const OK_SHEET_ID = "1WTUD2cVVNfhx7F64Dg7_l47HumOim6rZJb3lkm8f9Fo";
+const OK_ALLOWED_ORIGIN = "https://ourkenya.com";
+
+function okCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", OK_ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+app.options("/api/contributions", (req, res) => {
+  okCors(res);
+  res.status(204).end();
+});
+
+app.post("/api/contributions", async (req, res) => {
+  okCors(res);
+  try {
+    const { topic, why, sources, email } = req.body || {};
+    if (!topic || !why) {
+      return res.status(400).json({ error: "topic and why are required" });
+    }
+    const { token } = await getGmailToken();
+    const timestamp = new Date().toISOString();
+    const row = [timestamp, topic, why, sources || "", email || "", "New"];
+    const sheetsUrl = `https://sheets.googleapis.com/v4/spreadsheets/${OK_SHEET_ID}/values/Submissions!A:F:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+    const sheetsResp = await fetch(sheetsUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [row] }),
+    });
+    if (!sheetsResp.ok) {
+      const err = await sheetsResp.text();
+      console.error("[contributions] Sheets error:", err);
+      return res.status(502).json({ error: "sheets write failed" });
+    }
+    console.log(`[contributions] New submission: "${topic}" from ${email || "anonymous"}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[contributions] Error:", err.message);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
 app.listen(PORT, () => {
   console.log(`openclaw-api-proxy listening on port ${PORT}`);
   console.log(`Auth guard: ${PROXY_AUTH_TOKEN ? "enabled" : "disabled (open)"}`);
