@@ -8,6 +8,16 @@ API keys live in environment variables on your server. Agents never see the raw 
 
 ---
 
+## Support Model
+
+**This is a one-time purchase ($10).** Updates are free. Support is community-driven via GitHub issues.
+
+- No guaranteed SLA or hand-holding support.
+- Escalation path: open a [GitHub issue](https://github.com/isaackaara/openclaw-api-proxy/issues) → check docs → ask in [OpenClaw Discord](https://discord.gg/openclaw)
+- You own the deployment. We own the code quality.
+
+---
+
 ## Why This Exists
 
 When an AI agent calls an external API directly, the API key ends up in the agent's context window. That means:
@@ -222,6 +232,73 @@ curl http://localhost:3000/proxy/openai/v1/models \
 7. The response is streamed back to the agent.
 
 The agent only ever sees the service name, the request path and body, and the response. The key value never leaves the server.
+
+---
+
+## Troubleshooting & FAQ
+
+### "502 Proxy error" when calling /proxy/ynab
+
+**Cause:** YNAB API rejected the request.
+**Fix:** Check that `YNAB_API_KEY` is set and valid. Verify the request path and body match YNAB's API spec.
+
+### "Unauthorized" error
+
+**Cause:** `PROXY_AUTH_TOKEN` is set but your request didn't include it.
+**Fix:** Add `Authorization: Bearer your-proxy-token` header.
+
+### "Service is not set" warning in logs
+
+**Cause:** You called `/proxy/:service` but that service's environment variable is not configured.
+**Fix:** Set the env var (e.g., `YNAB_API_KEY=...`) and restart the proxy.
+
+### Proxy crashes on startup
+
+**Cause:** `services.json` is malformed.
+**Fix:** Validate JSON: `cat services.json | jq .` (requires `jq`).
+
+### Response times are slow (>1s per request)
+
+**Cause:** Upstream API is slow or proxy is overloaded.
+**Fix:** Check upstream API status. Scale horizontally (run multiple proxies behind a load balancer).
+
+### "Not found" when calling /proxy/admin or other admin paths
+
+**Cause:** Admin endpoints are not exposed (by design).
+**Fix:** This is correct behavior. The proxy only serves `/proxy/:service/...`, `/api/gmail/...`, and `/health`.
+
+### How do I add a new service (e.g., Twilio)?
+
+1. Add entry to `services.json`:
+   ```json
+   "twilio": {
+     "baseUrl": "https://api.twilio.com",
+     "keyEnv": "TWILIO_AUTH_TOKEN",
+     "authHeader": "Authorization",
+     "authPrefix": "Bearer"
+   }
+   ```
+2. Set `TWILIO_AUTH_TOKEN` in your environment.
+3. Restart the proxy.
+4. Call `/proxy/twilio/...`
+
+### Does the proxy log my API keys or request bodies?
+
+**No.** The proxy only logs method + path. Request bodies and key values are never logged. (Check `index.js` line ~20 for the logger.)
+
+### Can I use this with private networks only?
+
+**Yes.** Leave `PROXY_AUTH_TOKEN` empty and run on a private network (VPN, Docker bridge, etc.). For public deployment, set `PROXY_AUTH_TOKEN` to a strong value.
+
+### What happens if my upstream API rate-limits me?
+
+The proxy passes through rate-limit responses (429, 503) from the upstream API. You'll need to handle retry logic in your agent or add a rate-limit manager.
+
+### How do I rotate API keys without downtime?
+
+1. Update the environment variable on your platform (Railway, Render, etc.).
+2. The next request uses the new key.
+3. Old connections may finish with the old key, but new ones use the new one.
 
 ---
 

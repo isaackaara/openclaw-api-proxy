@@ -172,6 +172,7 @@ const SERVICES = JSON.parse(fs.readFileSync(servicesPath, "utf8"));
 
 // Body parsing for /api/* routes
 app.use("/api", express.json({ limit: "10mb" }));
+app.use("/api", express.urlencoded({ extended: true }));
 
 // Optional: request logger
 app.use((req, res, next) => {
@@ -924,6 +925,342 @@ app.post("/api/gmail/messages/:id/modify", async (req, res) => {
 });
 
 // --------------------------------------------------------------------------
+// QuickBooks OAuth 2.0 + API proxy
+// Env vars: QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REALM_ID,
+//           QUICKBOOKS_REFRESH_TOKEN
+// --------------------------------------------------------------------------
+
+const QB_AUTH_BASE = "https://appcenter.intuit.com/connect/oauth2";
+const QB_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+const QB_API_BASE = "https://quickbooks.api.intuit.com";
+const QB_SCOPES = "com.intuit.quickbooks.accounting";
+
+// In-memory token cache (refreshed on demand)
+let qbAccessToken = null;
+let qbAccessTokenExpiry = 0;
+
+/**
+ * Exchange an authorization code or refresh token for QB tokens.
+ * grant_type: "authorization_code" | "refresh_token"
+ */
+function qbTokenExchange({ grantType, code, redirectUri, refreshToken }) {
+  return new Promise((resolve, reject) => {
+    const clientId = process.env.QUICKBOOKS_CLIENT_ID;
+    const clientSecret = process.env.QUICKBOOKS_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      return reject(new Error("QUICKBOOKS_CLIENT_ID or QUICKBOOKS_CLIENT_SECRET not set"));
+    }
+
+    const params = new URLSearchParams();
+    params.set("grant_type", grantType);
+    if (grantType === "authorization_code") {
+      params.set("code", code);
+      params.set("redirect_uri", redirectUri);
+    } else {
+      params.set("refresh_token", refreshToken);
+    }
+
+    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    const body = params.toString();
+
+    const url = new URL(QB_TOKEN_URL);
+    const options = {
+      hostname: url.hostname,
+      port: 443,
+      path: url.pathname,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "Authorization": `Basic ${basicAuth}`,
+        "Content-Length": Buffer.byteLength(body),
+      },
+    };
+
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) {
+            return reject(new Error(`QB token error: ${parsed.error} - ${parsed.error_description || ""}`));
+          }
+          resolve(parsed);
+        } catch (e) {
+          reject(new Error(`QB token parse error: ${data.slice(0, 300)}`));
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Get a valid QB access token, refreshing if needed.
+ */
+async function getQBAccessToken() {
+  // Return cached token if still valid (with 60s buffer)
+  if (qbAccessToken && Date.now() < qbAccessTokenExpiry - 60000) {
+    return qbAccessToken;
+  }
+
+  const refreshToken = process.env.QUICKBOOKS_REFRESH_TOKEN;
+  if (!refreshToken) {
+    throw new Error("QUICKBOOKS_REFRESH_TOKEN not set. Complete OAuth flow at /api/quickbooks/auth first.");
+  }
+
+  const result = await qbTokenExchange({
+    grantType: "refresh_token",
+    refreshToken,
+  });
+
+  qbAccessToken = result.access_token;
+  qbAccessTokenExpiry = Date.now() + (result.expires_in || 3600) * 1000;
+
+  // If QB issued a new refresh token, log it (operator should update env var)
+  if (result.refresh_token && result.refresh_token !== refreshToken) {
+    console.log(`[QB] New refresh token issued: ${result.refresh_token}`);
+    console.log(`[QB] Update QUICKBOOKS_REFRESH_TOKEN env var with the value above.`);
+    // Update in-process so subsequent calls work until restart
+    process.env.QUICKBOOKS_REFRESH_TOKEN = result.refresh_token;
+  }
+
+  return qbAccessToken;
+}
+
+/**
+ * GET /api/quickbooks/auth
+ * Initiates OAuth flow. Redirects browser to Intuit authorization page.
+ * Query: ?redirect_uri=... (optional override; defaults to this server's callback)
+ */
+app.get("/api/quickbooks/auth", (req, res) => {
+  const clientId = process.env.QUICKBOOKS_CLIENT_ID;
+  if (!clientId) {
+    return res.status(500).json({ error: "QUICKBOOKS_CLIENT_ID not configured" });
+  }
+
+  // Build redirect URI: default to this server's callback
+  const host = req.headers["x-forwarded-proto"]
+    ? `${req.headers["x-forwarded-proto"]}://${req.headers.host}`
+    : `${req.protocol}://${req.headers.host}`;
+  const redirectUri = req.query.redirect_uri || `${host}/api/quickbooks/callback`;
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: "code",
+    scope: QB_SCOPES,
+    redirect_uri: redirectUri,
+    state: "openclaw_qb_auth",
+  });
+
+  const authUrl = `${QB_AUTH_BASE}?${params.toString()}`;
+  console.log(`[QB] OAuth redirect -> ${authUrl}`);
+  res.redirect(authUrl);
+});
+
+/**
+ * GET /api/quickbooks/callback
+ * Handles OAuth callback from Intuit. Exchanges auth code for tokens.
+ * Displays the refresh token for the operator to save.
+ */
+app.get("/api/quickbooks/callback", async (req, res) => {
+  const { code, realmId, error, state } = req.query;
+
+  if (error) {
+    return res.status(400).json({ error: "OAuth denied", detail: error });
+  }
+
+  if (!code) {
+    return res.status(400).json({ error: "Missing authorization code" });
+  }
+
+  // Build the same redirect URI used in /auth
+  const host = req.headers["x-forwarded-proto"]
+    ? `${req.headers["x-forwarded-proto"]}://${req.headers.host}`
+    : `${req.protocol}://${req.headers.host}`;
+  const redirectUri = `${host}/api/quickbooks/callback`;
+
+  try {
+    const tokens = await qbTokenExchange({
+      grantType: "authorization_code",
+      code,
+      redirectUri,
+    });
+
+    // Cache the access token
+    qbAccessToken = tokens.access_token;
+    qbAccessTokenExpiry = Date.now() + (tokens.expires_in || 3600) * 1000;
+
+    // Store refresh token in-process
+    if (tokens.refresh_token) {
+      process.env.QUICKBOOKS_REFRESH_TOKEN = tokens.refresh_token;
+    }
+
+    console.log(`[QB] OAuth complete! Realm: ${realmId || process.env.QUICKBOOKS_REALM_ID}`);
+    console.log(`[QB] Refresh token: ${tokens.refresh_token}`);
+    console.log(`[QB] Access token expires in: ${tokens.expires_in}s`);
+
+    // Return a nice HTML page with the token info
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>QuickBooks OAuth Complete</title>
+      <style>
+        body { font-family: system-ui; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+        .token { background: #f0f0f0; padding: 12px; border-radius: 6px; word-break: break-all; font-family: monospace; font-size: 14px; }
+        .success { color: #16a34a; }
+        h1 { color: #1e40af; }
+        .step { margin: 12px 0; padding: 8px 12px; background: #fefce8; border-left: 3px solid #eab308; }
+      </style>
+      </head>
+      <body>
+        <h1>QuickBooks OAuth Complete</h1>
+        <p class="success"><strong>Authorization successful!</strong></p>
+        <p><strong>Realm ID:</strong> ${realmId || process.env.QUICKBOOKS_REALM_ID || "unknown"}</p>
+        <p><strong>Access token expires in:</strong> ${tokens.expires_in || 3600} seconds</p>
+        <h2>Refresh Token</h2>
+        <div class="token" id="rt">${tokens.refresh_token || "NOT PROVIDED"}</div>
+        <br>
+        <button onclick="navigator.clipboard.writeText(document.getElementById('rt').textContent).then(()=>alert('Copied!'))">Copy Refresh Token</button>
+        <h2>Next Steps</h2>
+        <div class="step">1. Copy the refresh token above</div>
+        <div class="step">2. In Railway dashboard, update <code>QUICKBOOKS_REFRESH_TOKEN</code> env var</div>
+        <div class="step">3. Also update <code>QB_REFRESH_TOKEN</code> and <code>QUICKBOOKS_API_KEY</code> if used</div>
+        <div class="step">4. Redeploy or restart the service</div>
+        <p><em>The token is cached in-process for now, so API calls will work until the next deploy.</em></p>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error("[QB callback] Error:", err.message);
+    res.status(500).json({ error: "Token exchange failed", detail: err.message });
+  }
+});
+
+/**
+ * GET /api/quickbooks/status
+ * Check if QB is configured and tokens are valid
+ */
+app.get("/api/quickbooks/status", async (req, res) => {
+  const configured = !!(
+    process.env.QUICKBOOKS_CLIENT_ID &&
+    process.env.QUICKBOOKS_CLIENT_SECRET &&
+    process.env.QUICKBOOKS_REFRESH_TOKEN
+  );
+
+  if (!configured) {
+    return res.json({
+      status: "not_configured",
+      hasClientId: !!process.env.QUICKBOOKS_CLIENT_ID,
+      hasClientSecret: !!process.env.QUICKBOOKS_CLIENT_SECRET,
+      hasRefreshToken: !!process.env.QUICKBOOKS_REFRESH_TOKEN,
+      realmId: process.env.QUICKBOOKS_REALM_ID || null,
+    });
+  }
+
+  try {
+    const token = await getQBAccessToken();
+    const realmId = process.env.QUICKBOOKS_REALM_ID;
+    // Quick test: fetch company info
+    const testResult = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: "quickbooks.api.intuit.com",
+        port: 443,
+        path: `/v3/company/${realmId}/companyinfo/${realmId}`,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      };
+      const req = https.request(options, (resp) => {
+        let data = "";
+        resp.on("data", (chunk) => (data += chunk));
+        resp.on("end", () => resolve({ status: resp.statusCode, body: data }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    res.json({
+      status: testResult.status === 200 ? "ok" : "error",
+      httpStatus: testResult.status,
+      realmId,
+      tokenCached: !!qbAccessToken,
+      tokenExpiry: qbAccessTokenExpiry ? new Date(qbAccessTokenExpiry).toISOString() : null,
+    });
+  } catch (err) {
+    res.json({
+      status: "error",
+      error: err.message,
+      realmId: process.env.QUICKBOOKS_REALM_ID,
+    });
+  }
+});
+
+/**
+ * ALL /api/quickbooks/v3/*
+ * Proxy requests to QuickBooks API with auto-refreshed OAuth token.
+ * Example: GET /api/quickbooks/v3/company/REALM/companyinfo/REALM
+ */
+app.all("/api/quickbooks/v3/*", async (req, res) => {
+  try {
+    const token = await getQBAccessToken();
+    const qbPath = req.path.replace("/api/quickbooks", "");
+    const qs = Object.keys(req.query).length
+      ? "?" + new URLSearchParams(req.query).toString()
+      : "";
+
+    const bodyStr = ["POST", "PUT", "PATCH"].includes(req.method) && req.body
+      ? JSON.stringify(req.body)
+      : null;
+
+    const options = {
+      hostname: "quickbooks.api.intuit.com",
+      port: 443,
+      path: `${qbPath}${qs}`,
+      method: req.method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+    };
+
+    if (bodyStr) {
+      options.headers["Content-Length"] = Buffer.byteLength(bodyStr);
+    }
+
+    const proxyReq = https.request(options, (proxyRes) => {
+      let data = "";
+      proxyRes.on("data", (chunk) => (data += chunk));
+      proxyRes.on("end", () => {
+        try {
+          res.status(proxyRes.statusCode).json(JSON.parse(data));
+        } catch {
+          res.status(proxyRes.statusCode).send(data);
+        }
+      });
+    });
+
+    proxyReq.on("error", (err) => {
+      console.error("[QB proxy] Error:", err.message);
+      res.status(502).json({ error: "QB proxy error", detail: err.message });
+    });
+
+    if (bodyStr) proxyReq.write(bodyStr);
+    proxyReq.end();
+  } catch (err) {
+    console.error("[QB proxy] Auth error:", err.message);
+    res.status(401).json({ error: err.message });
+  }
+});
+
+// --------------------------------------------------------------------------
 // Dynamic proxy: /proxy/:service/*  (existing API key services)
 // --------------------------------------------------------------------------
 
@@ -1106,7 +1443,7 @@ app.post("/api/contributions", async (req, res) => {
 app.use((req, res) => {
   res.status(404).json({
     error: "Not found",
-    hint: "Use /proxy/:service/... for API key services. Use /api/gmail/... for Gmail via Nango. See /health for all endpoints.",
+    hint: "Use /proxy/:service/... for API key services. Use /api/gmail/... for Gmail. Use /api/quickbooks/... for QuickBooks. See /health for all endpoints.",
   });
 });
 
