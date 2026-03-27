@@ -928,6 +928,8 @@ app.post("/api/gmail/messages/:id/modify", async (req, res) => {
 // QuickBooks OAuth 2.0 + API proxy
 // Env vars: QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REALM_ID,
 //           QUICKBOOKS_REFRESH_TOKEN
+// Railway env update: RAILWAY_API_TOKEN, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID,
+//                     RAILWAY_ENVIRONMENT_ID (optional, defaults to "production")
 // --------------------------------------------------------------------------
 
 const QB_AUTH_BASE = "https://appcenter.intuit.com/connect/oauth2";
@@ -938,6 +940,236 @@ const QB_SCOPES = "com.intuit.quickbooks.accounting";
 // In-memory token cache (refreshed on demand)
 let qbAccessToken = null;
 let qbAccessTokenExpiry = 0;
+
+// --------------------------------------------------------------------------
+// Railway GraphQL: update environment variables on successful QB token refresh
+// Required env vars: RAILWAY_API_TOKEN, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID
+// Optional: RAILWAY_ENVIRONMENT_ID (defaults to searching by name "production")
+// --------------------------------------------------------------------------
+async function updateRailwayEnvVars(vars) {
+  const token = process.env.RAILWAY_API_TOKEN;
+  const projectId = process.env.RAILWAY_PROJECT_ID;
+  const serviceId = process.env.RAILWAY_SERVICE_ID;
+  const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
+
+  if (!token || !projectId || !serviceId) {
+    console.warn(
+      `[QB Cron] Railway env update skipped - missing RAILWAY_API_TOKEN, RAILWAY_PROJECT_ID, or RAILWAY_SERVICE_ID`
+    );
+    return false;
+  }
+
+  // If no explicit environment ID, fetch it by name (default: "production")
+  let envId = environmentId;
+  if (!envId) {
+    try {
+      envId = await getRailwayEnvironmentId(token, projectId, "production");
+    } catch (err) {
+      console.error(`[QB Cron] Could not resolve Railway environment ID:`, err.message);
+      return false;
+    }
+  }
+
+  const mutation = `
+    mutation UpsertVariables($input: VariableCollectionUpsertInput!) {
+      variableCollectionUpsert(input: $input)
+    }
+  `;
+  const body = JSON.stringify({
+    query: mutation,
+    variables: {
+      input: {
+        projectId,
+        serviceId,
+        environmentId: envId,
+        variables: vars,
+      },
+    },
+  });
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: "backboard.railway.com",
+      port: 443,
+      path: "/graphql/v2",
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    };
+
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.errors) {
+            console.error(`[QB Cron] Railway GraphQL errors:`, JSON.stringify(parsed.errors));
+            return resolve(false);
+          }
+          console.log(`[QB Cron] Railway env vars updated:`, Object.keys(vars).join(", "));
+          resolve(true);
+        } catch (e) {
+          console.error(`[QB Cron] Railway response parse error:`, data.slice(0, 200));
+          resolve(false);
+        }
+      });
+    });
+
+    req.on("error", (err) => {
+      console.error(`[QB Cron] Railway API request failed:`, err.message);
+      resolve(false);
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Resolve Railway environment ID by name (e.g. "production").
+ */
+function getRailwayEnvironmentId(token, projectId, envName) {
+  const query = `
+    query GetEnvironments($id: String!) {
+      project(id: $id) {
+        environments { edges { node { id name } } }
+      }
+    }
+  `;
+  const body = JSON.stringify({ query, variables: { id: projectId } });
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: "backboard.railway.com",
+      port: 443,
+      path: "/graphql/v2",
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    };
+
+    const req = https.request(options, (resp) => {
+      let data = "";
+      resp.on("data", (chunk) => (data += chunk));
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          const edges = parsed?.data?.project?.environments?.edges || [];
+          const match = edges.find((e) => e.node.name.toLowerCase() === envName.toLowerCase());
+          if (!match) return reject(new Error(`No Railway environment named "${envName}"`));
+          resolve(match.node.id);
+        } catch (e) {
+          reject(new Error(`Railway env lookup parse error: ${data.slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// --------------------------------------------------------------------------
+// QB daily token refresh: proactively rotate refresh token each morning
+// Fires at 06:00 EAT (Africa/Nairobi = UTC+3 = 03:00 UTC)
+// --------------------------------------------------------------------------
+
+/**
+ * Refresh QB tokens (both access + refresh token).
+ * QB may or may not issue a new refresh token - we handle both cases.
+ * On new refresh token: update Railway env vars + process.env immediately.
+ * Returns { success, newRefreshToken, error }
+ */
+async function refreshQBTokens() {
+  const ts = new Date().toISOString();
+  const refreshToken = process.env.QUICKBOOKS_REFRESH_TOKEN;
+
+  console.log(`[QB Cron] ${ts} - Starting daily token refresh`);
+
+  if (!refreshToken) {
+    const msg = "QUICKBOOKS_REFRESH_TOKEN not set - skipping refresh";
+    console.error(`[QB Cron] ${ts} - ${msg}`);
+    return { success: false, error: msg };
+  }
+
+  try {
+    const result = await qbTokenExchange({ grantType: "refresh_token", refreshToken });
+
+    // Always update the in-memory access token cache
+    qbAccessToken = result.access_token;
+    qbAccessTokenExpiry = Date.now() + (result.expires_in || 3600) * 1000;
+
+    console.log(
+      `[QB Cron] ${ts} - Access token refreshed successfully, expires in ${result.expires_in || 3600}s`
+    );
+
+    // Handle new refresh token (QB rotates these periodically)
+    if (result.refresh_token && result.refresh_token !== refreshToken) {
+      console.log(`[QB Cron] ${ts} - New refresh token issued by Intuit - updating Railway env vars`);
+      console.log(`[QB Cron] New refresh token (first 20 chars): ${result.refresh_token.slice(0, 20)}...`);
+
+      // Update in-process immediately so subsequent calls work without restart
+      process.env.QUICKBOOKS_REFRESH_TOKEN = result.refresh_token;
+      process.env.QB_REFRESH_TOKEN = result.refresh_token;
+
+      // Persist to Railway (survives restart/redeploy)
+      await updateRailwayEnvVars({
+        QUICKBOOKS_REFRESH_TOKEN: result.refresh_token,
+        QB_REFRESH_TOKEN: result.refresh_token,
+      });
+
+      return { success: true, newRefreshToken: result.refresh_token };
+    }
+
+    // Same refresh token returned (or not returned) - still a success
+    console.log(`[QB Cron] ${ts} - Refresh token unchanged (Intuit did not rotate it)`);
+    return { success: true, newRefreshToken: null };
+  } catch (err) {
+    const ts2 = new Date().toISOString();
+    console.error(`[QB Cron] ${ts2} - Token refresh FAILED: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Schedule QB token refresh daily at 06:00 EAT (03:00 UTC).
+ * Uses recursive setTimeout so the schedule self-corrects each day.
+ */
+function scheduleQBDailyRefresh() {
+  function msUntilNextRefresh() {
+    const now = new Date();
+    // Next 03:00 UTC
+    const next = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 3, 0, 0, 0)
+    );
+    if (next <= now) {
+      // Already past today's 03:00 UTC - target tomorrow
+      next.setUTCDate(next.getUTCDate() + 1);
+    }
+    return next.getTime() - now.getTime();
+  }
+
+  function scheduleNext() {
+    const ms = msUntilNextRefresh();
+    const nextRun = new Date(Date.now() + ms).toISOString();
+    console.log(`[QB Cron] Next daily token refresh scheduled for ${nextRun} (${Math.round(ms / 60000)} min from now)`);
+
+    setTimeout(async () => {
+      await refreshQBTokens();
+      scheduleNext(); // Schedule the next day's run
+    }, ms);
+  }
+
+  scheduleNext();
+}
 
 /**
  * Exchange an authorization code or refresh token for QB tokens.
@@ -1021,12 +1253,19 @@ async function getQBAccessToken() {
   qbAccessToken = result.access_token;
   qbAccessTokenExpiry = Date.now() + (result.expires_in || 3600) * 1000;
 
-  // If QB issued a new refresh token, log it (operator should update env var)
+  // If QB issued a new refresh token, persist it everywhere immediately
   if (result.refresh_token && result.refresh_token !== refreshToken) {
-    console.log(`[QB] New refresh token issued: ${result.refresh_token}`);
-    console.log(`[QB] Update QUICKBOOKS_REFRESH_TOKEN env var with the value above.`);
-    // Update in-process so subsequent calls work until restart
+    const ts = new Date().toISOString();
+    console.log(`[QB] ${ts} - New refresh token issued by Intuit`);
+    console.log(`[QB] ${ts} - New refresh token (first 20 chars): ${result.refresh_token.slice(0, 20)}...`);
+    // Update in-process so subsequent calls work without restart
     process.env.QUICKBOOKS_REFRESH_TOKEN = result.refresh_token;
+    process.env.QB_REFRESH_TOKEN = result.refresh_token;
+    // Persist to Railway (fire-and-forget - don't block the access token return)
+    updateRailwayEnvVars({
+      QUICKBOOKS_REFRESH_TOKEN: result.refresh_token,
+      QB_REFRESH_TOKEN: result.refresh_token,
+    }).catch((err) => console.error(`[QB] Railway env update failed:`, err.message));
   }
 
   return qbAccessToken;
@@ -1145,6 +1384,24 @@ app.get("/api/quickbooks/callback", async (req, res) => {
 });
 
 /**
+ * POST /api/quickbooks/token/refresh
+ * Manually trigger QB refresh token rotation (same logic as daily cron).
+ * Use this to test the cron flow or force-rotate a token before expiry.
+ */
+app.post("/api/quickbooks/token/refresh", async (req, res) => {
+  const ts = new Date().toISOString();
+  console.log(`[QB] ${ts} - Manual token refresh triggered via API`);
+  const result = await refreshQBTokens();
+  res.json({
+    timestamp: ts,
+    ...result,
+    newRefreshToken: result.newRefreshToken
+      ? `${result.newRefreshToken.slice(0, 20)}... (truncated for security)`
+      : null,
+  });
+});
+
+/**
  * GET /api/quickbooks/status
  * Check if QB is configured and tokens are valid
  */
@@ -1206,60 +1463,85 @@ app.get("/api/quickbooks/status", async (req, res) => {
 });
 
 /**
- * ALL /api/quickbooks/v3/*
- * Proxy requests to QuickBooks API with auto-refreshed OAuth token.
- * Example: GET /api/quickbooks/v3/company/REALM/companyinfo/REALM
+ * Forward a single QB API request. Returns { statusCode, body (string) }.
  */
-app.all("/api/quickbooks/v3/*", async (req, res) => {
-  try {
-    const token = await getQBAccessToken();
-    const qbPath = req.path.replace("/api/quickbooks", "");
-    const qs = Object.keys(req.query).length
-      ? "?" + new URLSearchParams(req.query).toString()
-      : "";
-
-    const bodyStr = ["POST", "PUT", "PATCH"].includes(req.method) && req.body
-      ? JSON.stringify(req.body)
-      : null;
-
+function qbApiRequest({ token, method, path, qs, bodyStr }) {
+  return new Promise((resolve, reject) => {
     const options = {
       hostname: "quickbooks.api.intuit.com",
       port: 443,
-      path: `${qbPath}${qs}`,
-      method: req.method,
+      path: `${path}${qs}`,
+      method,
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: "application/json",
         "Content-Type": "application/json",
       },
     };
+    if (bodyStr) options.headers["Content-Length"] = Buffer.byteLength(bodyStr);
 
-    if (bodyStr) {
-      options.headers["Content-Length"] = Buffer.byteLength(bodyStr);
-    }
-
-    const proxyReq = https.request(options, (proxyRes) => {
+    const req = https.request(options, (proxyRes) => {
       let data = "";
       proxyRes.on("data", (chunk) => (data += chunk));
-      proxyRes.on("end", () => {
-        try {
-          res.status(proxyRes.statusCode).json(JSON.parse(data));
-        } catch {
-          res.status(proxyRes.statusCode).send(data);
-        }
-      });
+      proxyRes.on("end", () => resolve({ statusCode: proxyRes.statusCode, body: data }));
     });
+    req.on("error", reject);
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
 
-    proxyReq.on("error", (err) => {
-      console.error("[QB proxy] Error:", err.message);
-      res.status(502).json({ error: "QB proxy error", detail: err.message });
-    });
+/**
+ * ALL /api/quickbooks/v3/*
+ * Proxy requests to QuickBooks API with auto-refreshed OAuth token.
+ * 401 interceptor: on 401, clear token cache, force-refresh, retry once.
+ * Example: GET /api/quickbooks/v3/company/REALM/companyinfo/REALM
+ */
+app.all("/api/quickbooks/v3/*", async (req, res) => {
+  const qbPath = req.path.replace("/api/quickbooks", "");
+  const qs = Object.keys(req.query).length
+    ? "?" + new URLSearchParams(req.query).toString()
+    : "";
+  const bodyStr = ["POST", "PUT", "PATCH"].includes(req.method) && req.body
+    ? JSON.stringify(req.body)
+    : null;
 
-    if (bodyStr) proxyReq.write(bodyStr);
-    proxyReq.end();
+  function sendResult({ statusCode, body }) {
+    try {
+      res.status(statusCode).json(JSON.parse(body));
+    } catch {
+      res.status(statusCode).send(body);
+    }
+  }
+
+  try {
+    const token = await getQBAccessToken();
+    const result = await qbApiRequest({ token, method: req.method, path: qbPath, qs, bodyStr });
+
+    // 401 interceptor: token may have expired between cache check and QB response
+    if (result.statusCode === 401) {
+      const ts = new Date().toISOString();
+      console.warn(`[QB proxy] ${ts} - 401 received from QB API - clearing token cache and retrying`);
+
+      // Force cache invalidation
+      qbAccessToken = null;
+      qbAccessTokenExpiry = 0;
+
+      try {
+        const freshToken = await getQBAccessToken();
+        const retryResult = await qbApiRequest({ token: freshToken, method: req.method, path: qbPath, qs, bodyStr });
+        console.log(`[QB proxy] ${ts} - Retry after 401 returned HTTP ${retryResult.statusCode}`);
+        return sendResult(retryResult);
+      } catch (retryErr) {
+        console.error(`[QB proxy] ${ts} - 401 retry failed: ${retryErr.message}`);
+        return res.status(401).json({ error: "QB auth failed after retry", detail: retryErr.message });
+      }
+    }
+
+    sendResult(result);
   } catch (err) {
     console.error("[QB proxy] Auth error:", err.message);
-    res.status(401).json({ error: err.message });
+    res.status(503).json({ error: err.message });
   }
 });
 
@@ -1466,6 +1748,21 @@ app.listen(PORT, () => {
   console.log(`Gmail (Service Account): ${hasServiceAccount() ? `configured${GMAIL_IMPERSONATE_EMAIL ? `, impersonating ${GMAIL_IMPERSONATE_EMAIL}` : " (set GMAIL_IMPERSONATE_EMAIL to enable impersonation)"}` : "NOT configured"}`);
   console.log(`Gmail (Nango): ${nangoReady ? "configured" : "NOT configured"}`);
   console.log(`Gmail auth priority: Direct OAuth > Service Account (JWT) > Nango (OAuth)`);
+
+  // Start QB daily cron (06:00 EAT = 03:00 UTC)
+  const qbConfigured = !!(
+    process.env.QUICKBOOKS_CLIENT_ID &&
+    process.env.QUICKBOOKS_CLIENT_SECRET &&
+    process.env.QUICKBOOKS_REFRESH_TOKEN
+  );
+  if (qbConfigured) {
+    scheduleQBDailyRefresh();
+    console.log(`QuickBooks: daily token refresh cron ACTIVE (fires at 06:00 EAT / 03:00 UTC)`);
+    const railwayConfigured = !!(process.env.RAILWAY_API_TOKEN && process.env.RAILWAY_PROJECT_ID && process.env.RAILWAY_SERVICE_ID);
+    console.log(`QuickBooks: Railway env auto-update: ${railwayConfigured ? "ENABLED" : "DISABLED (set RAILWAY_API_TOKEN, RAILWAY_PROJECT_ID, RAILWAY_SERVICE_ID to enable)"}`);
+  } else {
+    console.log(`QuickBooks: NOT configured - cron will not start (set QUICKBOOKS_CLIENT_ID, QUICKBOOKS_CLIENT_SECRET, QUICKBOOKS_REFRESH_TOKEN)`);
+  }
 });
 
 module.exports = app;
