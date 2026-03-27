@@ -1044,11 +1044,11 @@ app.get("/api/quickbooks/auth", (req, res) => {
   }
 
   // Build redirect URI: default to this server's callback
-  let host = req.headers["x-forwarded-proto"]
-    ? `${req.headers["x-forwarded-proto"]}://${req.headers.host}`
-    : `${req.protocol}://${req.headers.host}`;
-  if (!host || host.includes("undefined")) {
-    host = "https://openclaw-api-proxy-production.up.railway.app";
+  let host = "https://openclaw-api-proxy-production.up.railway.app";
+  if (req.headers.host && req.headers["x-forwarded-proto"]) {
+    host = `${req.headers["x-forwarded-proto"]}://${req.headers.host}`;
+  } else if (req.headers.host && req.protocol) {
+    host = `${req.protocol}://${req.headers.host}`;
   }
   const redirectUri = req.query.redirect_uri || `${host}/api/quickbooks/callback`;
 
