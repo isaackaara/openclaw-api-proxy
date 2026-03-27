@@ -185,7 +185,7 @@ app.use((req, res, next) => {
 // /health and /services are exempt so Railway's healthcheck (no auth header) passes
 app.use((req, res, next) => {
   if (!PROXY_AUTH_TOKEN) return next();
-  if (req.path === "/health" || req.path === "/services" || req.path === "/api/contributions") return next();
+  if (req.path === "/health" || req.path === "/services" || req.path === "/api/contributions" || req.path === "/api/quickbooks/auth" || req.path === "/api/quickbooks/callback") return next();
   const authHeader = req.headers["authorization"] || "";
   const token = authHeader.replace(/^Bearer\s+/i, "");
   if (token !== PROXY_AUTH_TOKEN) {
